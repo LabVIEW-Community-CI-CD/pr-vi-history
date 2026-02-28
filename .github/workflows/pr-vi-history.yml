@@ -47,6 +47,31 @@ on:
         required: false
         default: ''
         type: string
+      windows_image:
+        description: 'NI windows container image used for compare lane'
+        required: false
+        default: 'nationalinstruments/labview:2026q1-windows'
+        type: string
+      linux_image:
+        description: 'NI linux container image used for smoke lane'
+        required: false
+        default: 'nationalinstruments/labview:2026q1-linux'
+        type: string
+      windows_runner:
+        description: 'Hosted runner label for windows compare lane'
+        required: false
+        default: 'windows-2025'
+        type: string
+      linux_runner:
+        description: 'Hosted runner label for linux smoke lane'
+        required: false
+        default: 'ubuntu-latest'
+        type: string
+      enable_linux_smoke:
+        description: 'Enable linux smoke/report plumbing lane'
+        required: false
+        default: true
+        type: boolean
   workflow_call:
     inputs:
       pr_number:
@@ -93,34 +118,65 @@ on:
         required: false
         default: ''
         type: string
+      windows_image:
+        description: 'NI windows container image used for compare lane'
+        required: false
+        default: 'nationalinstruments/labview:2026q1-windows'
+        type: string
+      linux_image:
+        description: 'NI linux container image used for smoke lane'
+        required: false
+        default: 'nationalinstruments/labview:2026q1-linux'
+        type: string
+      windows_runner:
+        description: 'Hosted runner label for windows compare lane'
+        required: false
+        default: 'windows-2025'
+        type: string
+      linux_runner:
+        description: 'Hosted runner label for linux smoke lane'
+        required: false
+        default: 'ubuntu-latest'
+        type: string
+      enable_linux_smoke:
+        description: 'Enable linux smoke/report plumbing lane'
+        required: false
+        default: true
+        type: boolean
     outputs:
       summary_path:
         description: 'Absolute path to pr-vi-history-summary@v1 json'
-        value: ${{ jobs.history.outputs.summary_path }}
+        value: ${{ jobs.finalize.outputs.summary_path }}
       results_root:
         description: 'Absolute path to artifact root'
-        value: ${{ jobs.history.outputs.results_root }}
+        value: ${{ jobs.finalize.outputs.results_root }}
       manifest_path:
         description: 'Absolute path to vi-diff-manifest@v1 json'
-        value: ${{ jobs.history.outputs.manifest_path }}
+        value: ${{ jobs.finalize.outputs.manifest_path }}
       pair_count:
         description: 'Manifest pair count'
-        value: ${{ jobs.history.outputs.pair_count }}
+        value: ${{ jobs.finalize.outputs.pair_count }}
       target_count:
         description: 'Summarized target count'
-        value: ${{ jobs.history.outputs.target_count }}
+        value: ${{ jobs.finalize.outputs.target_count }}
       completed_count:
         description: 'Completed target count'
-        value: ${{ jobs.history.outputs.completed_count }}
+        value: ${{ jobs.finalize.outputs.completed_count }}
       diff_count:
         description: 'Total diff count from summary markdown payload'
-        value: ${{ jobs.history.outputs.diff_count }}
+        value: ${{ jobs.finalize.outputs.diff_count }}
       markdown_path:
         description: 'Absolute path to rendered markdown summary'
-        value: ${{ jobs.history.outputs.markdown_path }}
+        value: ${{ jobs.finalize.outputs.markdown_path }}
       artifact_name:
         description: 'Uploaded artifact name'
-        value: ${{ jobs.history.outputs.artifact_name }}
+        value: ${{ jobs.finalize.outputs.artifact_name }}
+      windows_lane_status:
+        description: 'Result status for the windows compare lane'
+        value: ${{ jobs.finalize.outputs.windows_lane_status }}
+      linux_lane_status:
+        description: 'Result status for the linux smoke lane'
+        value: ${{ jobs.finalize.outputs.linux_lane_status }}
 
 permissions:
   contents: read
@@ -131,27 +187,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  history:
-    name: PR VI history compare
-    runs-on: [self-hosted, Windows, X64]
-    outputs:
-      summary_path: ${{ steps.history.outputs.summary_path || '' }}
-      results_root: ${{ steps.paths.outputs.results_root }}
-      manifest_path: ${{ steps.manifest.outputs.manifest_path }}
-      pair_count: ${{ steps.manifest.outputs.pair_count || '0' }}
-      target_count: ${{ steps.summarize.outputs.target_count || '0' }}
-      completed_count: ${{ steps.summarize.outputs.completed_count || '0' }}
-      diff_count: ${{ steps.summarize.outputs.diff_count || '0' }}
-      markdown_path: ${{ steps.summarize.outputs.markdown_path || '' }}
-      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+  prepare:
+    name: Prepare PR metadata and manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       PR_NUMBER: ${{ inputs.pr_number }}
       FETCH_DEPTH: ${{ inputs.fetch_depth }}
-      MAX_PAIRS: ${{ inputs.max_pairs }}
-      COMPARE_MODES: ${{ inputs.compare_modes }}
-      INCLUDE_MERGE_PARENTS: ${{ inputs.include_merge_parents }}
-      RESULTS_ROOT_INPUT: ${{ inputs.results_root }}
-      NOTE: ${{ inputs.note }}
+    outputs:
+      tools_repository: ${{ steps.source.outputs.tools_repository }}
+      tools_ref: ${{ steps.source.outputs.tools_ref }}
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+      pr_url: ${{ steps.pr.outputs.pr_url }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+      pair_count: ${{ steps.manifest.outputs.pair_count }}
+      manifest_artifact_name: ${{ steps.meta.outputs.manifest_artifact_name }}
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
     steps:
       - name: Compute artifact metadata
         id: meta
@@ -160,26 +212,25 @@ jobs:
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           $artifactName = "pr-vi-history-$($env:PR_NUMBER)"
+          $manifestArtifactName = "pr-vi-history-prepare-${{ github.run_id }}-${{ github.run_attempt }}"
           "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "manifest_artifact_name=$manifestArtifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Resolve results paths
-        id: paths
+      - name: Resolve workflow source repository
+        id: source
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-
-          $rootInput = if ([string]::IsNullOrWhiteSpace($env:RESULTS_ROOT_INPUT)) { 'tests/results/pr-vi-history' } else { $env:RESULTS_ROOT_INPUT }
-          $resultsRoot = if ([System.IO.Path]::IsPathRooted($rootInput)) { $rootInput } else { Join-Path $env:GITHUB_WORKSPACE $rootInput }
-          New-Item -ItemType Directory -Path $resultsRoot -Force | Out-Null
-          $resultsRoot = (Resolve-Path -LiteralPath $resultsRoot).Path
-
-          $manifestPath = Join-Path $resultsRoot 'vi-history-manifest.json'
-          $summaryPath = Join-Path $resultsRoot 'vi-history-summary.json'
-
-          "results_root=$resultsRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "manifest_path=$manifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "summary_path=$summaryPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          $workflowRef = $env:GITHUB_WORKFLOW_REF
+          if ([string]::IsNullOrWhiteSpace($workflowRef)) {
+            throw 'GITHUB_WORKFLOW_REF is empty; cannot resolve workflow source repository.'
+          }
+          if ($workflowRef -notmatch '^(?<repo>[^@]+?)/\.github/workflows/[^@]+@(?<ref>.+)$') {
+            throw ("Unable to parse workflow source from GITHUB_WORKFLOW_REF: {0}" -f $workflowRef)
+          }
+          "tools_repository=$($Matches.repo)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tools_ref=$($Matches.ref)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Resolve pull request metadata
         id: pr
@@ -190,38 +241,34 @@ jobs:
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-
-          if ([string]::IsNullOrWhiteSpace($env:PR_NUMBER)) {
-            throw 'Input pr_number is required.'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:REPO_SLUG)) {
-            throw 'Unable to determine repository slug from github.repository.'
-          }
-
           $json = gh pr view $env:PR_NUMBER --repo $env:REPO_SLUG --json number,url,baseRefName,baseRefOid,headRefName,headRefOid
           $info = $json | ConvertFrom-Json
           if (-not $info) {
             throw ("Unable to load pull request metadata for #{0}" -f $env:PR_NUMBER)
           }
-
           "pr_number=$($info.number)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "pr_url=$($info.url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "base_sha=$($info.baseRefOid)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "head_sha=$($info.headRefOid)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "base_ref=$($info.baseRefName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "head_ref=$($info.headRefName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Checkout repository
+      - name: Checkout caller repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Checkout pull request head
+      - name: Checkout workflow toolchain
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.source.outputs.tools_repository }}
+          ref: ${{ steps.source.outputs.tools_ref }}
+          path: .pr-vi-history-tools
+          fetch-depth: 1
+
+      - name: Fetch pull request head
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-
           $fetchDepth = 20
           if (-not [string]::IsNullOrWhiteSpace($env:FETCH_DEPTH)) {
             $parsed = 0
@@ -229,83 +276,160 @@ jobs:
               $fetchDepth = $parsed
             }
           }
-          $prNumber = $env:PR_NUMBER
-          if ([string]::IsNullOrWhiteSpace($prNumber)) {
-            throw 'Missing PR number while fetching pull request head.'
-          }
-
-          git fetch --no-tags --depth=$fetchDepth origin ("pull/{0}/head:pr-{0}-head" -f $prNumber)
-          git checkout --detach ("pr-{0}-head" -f $prNumber)
-          git branch -D ("pr-{0}-head" -f $prNumber) 2>$null | Out-Null
-
-      - name: Checkout reusable workflow tools
-        uses: actions/checkout@v5
-        with:
-          repository: svelderrainruiz/pr-vi-history
-          ref: v1
-          path: .pr-vi-history
-          fetch-depth: 1
+          git fetch --no-tags --depth=$fetchDepth origin ("pull/{0}/head:pr-{0}-head" -f $env:PR_NUMBER)
 
       - name: Generate VI diff manifest
         id: manifest
         env:
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-          MANIFEST_PATH: ${{ steps.paths.outputs.manifest_path }}
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-
-          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE '.pr-vi-history' 'tools'
-          $manifestScript = Join-Path $toolsRoot 'Get-PRVIDiffManifest.ps1'
-          if (-not (Test-Path -LiteralPath $manifestScript -PathType Leaf)) {
-            throw ("Missing manifest script: {0}" -f $manifestScript)
+          $prepDir = Join-Path $env:RUNNER_TEMP 'pr-vi-history-prepare'
+          New-Item -ItemType Directory -Path $prepDir -Force | Out-Null
+          $manifestPath = Join-Path $prepDir 'vi-history-manifest.json'
+          $scriptPath = Join-Path $env:GITHUB_WORKSPACE '.pr-vi-history-tools' 'tools' 'Get-PRVIDiffManifest.ps1'
+          if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+            throw ("Missing manifest generator: {0}" -f $scriptPath)
           }
-
-          pwsh -NoLogo -NoProfile -File $manifestScript `
-            -BaseRef $env:BASE_SHA `
-            -HeadRef $env:HEAD_SHA `
-            -OutputPath $env:MANIFEST_PATH
-
-          if (-not (Test-Path -LiteralPath $env:MANIFEST_PATH -PathType Leaf)) {
-            throw ("Manifest generation failed: {0}" -f $env:MANIFEST_PATH)
+          pwsh -NoLogo -NoProfile -File $scriptPath -BaseRef $env:BASE_SHA -HeadRef $env:HEAD_SHA -OutputPath $manifestPath
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw ("Manifest generation failed: {0}" -f $manifestPath)
           }
-
           $pairs = 0
-          $content = Get-Content -LiteralPath $env:MANIFEST_PATH -Raw
+          $content = Get-Content -LiteralPath $manifestPath -Raw
           if (-not [string]::IsNullOrWhiteSpace($content)) {
-            try {
-              $json = $content | ConvertFrom-Json -ErrorAction Stop
-              if ($json -and $json.pairs -is [System.Collections.IEnumerable]) {
-                $pairs = @($json.pairs).Count
-              }
-            } catch {
-              throw ("Manifest parse failure at {0}: {1}" -f $env:MANIFEST_PATH, $_.Exception.Message)
+            $json = $content | ConvertFrom-Json
+            if ($json -and $json.pairs -is [System.Collections.IEnumerable]) {
+              $pairs = @($json.pairs).Count
             }
           }
-
-          "manifest_path=$($env:MANIFEST_PATH)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "manifest_path=$manifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "pair_count=$pairs" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Run VI history compare
-        if: steps.manifest.outputs.pair_count != '0'
+      - name: Upload prepare artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.meta.outputs.manifest_artifact_name }}
+          path: ${{ steps.manifest.outputs.manifest_path }}
+          if-no-files-found: error
+
+  history_windows_container:
+    name: History compare (2026q1-windows)
+    needs: prepare
+    runs-on: ${{ inputs.windows_runner }}
+    timeout-minutes: 30
+    env:
+      PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+      FETCH_DEPTH: ${{ inputs.fetch_depth }}
+      MAX_PAIRS: ${{ inputs.max_pairs }}
+      COMPARE_MODES: ${{ inputs.compare_modes }}
+      INCLUDE_MERGE_PARENTS: ${{ inputs.include_merge_parents }}
+      RESULTS_ROOT_INPUT: ${{ inputs.results_root }}
+      NOTE: ${{ inputs.note }}
+      WINDOWS_IMAGE: ${{ inputs.windows_image }}
+    outputs:
+      summary_path: ${{ steps.metrics.outputs.summary_path || '' }}
+      results_root: ${{ steps.paths.outputs.results_root }}
+      manifest_path: ${{ steps.manifest.outputs.manifest_path }}
+      pair_count: ${{ needs.prepare.outputs.pair_count || '0' }}
+      target_count: ${{ steps.metrics.outputs.target_count || '0' }}
+      completed_count: ${{ steps.metrics.outputs.completed_count || '0' }}
+      diff_count: ${{ steps.metrics.outputs.diff_count || '0' }}
+      markdown_path: ${{ steps.summarize.outputs.markdown_path || '' }}
+      markdown: ${{ steps.summarize.outputs.markdown || '' }}
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+      lane_status: ${{ steps.lane.outputs.status || 'unknown' }}
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout workflow toolchain
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ needs.prepare.outputs.tools_repository }}
+          ref: ${{ needs.prepare.outputs.tools_ref }}
+          path: .pr-vi-history-tools
+          fetch-depth: 1
+
+      - name: Compute artifact metadata
+        id: meta
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          "artifact_name=${{ needs.prepare.outputs.artifact_name }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Resolve results paths
+        id: paths
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $rootInput = if ([string]::IsNullOrWhiteSpace($env:RESULTS_ROOT_INPUT)) { 'tests/results/pr-vi-history' } else { $env:RESULTS_ROOT_INPUT }
+          $resultsRoot = if ([System.IO.Path]::IsPathRooted($rootInput)) { $rootInput } else { Join-Path $env:GITHUB_WORKSPACE $rootInput }
+          New-Item -ItemType Directory -Path $resultsRoot -Force | Out-Null
+          $resultsRoot = (Resolve-Path -LiteralPath $resultsRoot).Path
+          $summaryPath = Join-Path $resultsRoot 'vi-history-summary.json'
+          "results_root=$resultsRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "summary_path=$summaryPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Fetch pull request head
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $fetchDepth = 20
+          if (-not [string]::IsNullOrWhiteSpace($env:FETCH_DEPTH)) {
+            $parsed = 0
+            if ([int]::TryParse($env:FETCH_DEPTH, [ref]$parsed) -and $parsed -gt 0) {
+              $fetchDepth = $parsed
+            }
+          }
+          git fetch --no-tags --depth=$fetchDepth origin ("pull/{0}/head:pr-{0}-head" -f $env:PR_NUMBER)
+          git checkout --detach ("pr-{0}-head" -f $env:PR_NUMBER)
+          git branch -D ("pr-{0}-head" -f $env:PR_NUMBER) 2>$null | Out-Null
+
+      - name: Download prepare artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.prepare.outputs.manifest_artifact_name }}
+          path: ${{ runner.temp }}/pr-vi-history-prepare
+
+      - name: Resolve manifest path
+        id: manifest
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $manifestPath = Join-Path $env:RUNNER_TEMP 'pr-vi-history-prepare' 'vi-history-manifest.json'
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw ("Manifest artifact missing: {0}" -f $manifestPath)
+          }
+          "manifest_path=$manifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Run VI history compare in windows container backend
+        if: ${{ needs.prepare.outputs.pair_count != '0' }}
         id: history
         env:
           MANIFEST_PATH: ${{ steps.manifest.outputs.manifest_path }}
           RESULTS_ROOT: ${{ steps.paths.outputs.results_root }}
           SUMMARY_PATH: ${{ steps.paths.outputs.summary_path }}
+          TOOLS_ROOT: ${{ github.workspace }}\\.pr-vi-history-tools
+          PR_VI_HISTORY_COMPARE_BACKEND: ni-windows-container
+          PR_VI_HISTORY_WINDOWS_IMAGE: ${{ inputs.windows_image }}
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-
-          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE '.pr-vi-history' 'tools'
-          $historyScript = Join-Path $toolsRoot 'Invoke-PRVIHistory.ps1'
+          $historyScript = Join-Path $env:TOOLS_ROOT 'tools' 'Invoke-PRVIHistory.ps1'
           if (-not (Test-Path -LiteralPath $historyScript -PathType Leaf)) {
             throw ("Missing compare script: {0}" -f $historyScript)
           }
-
           $args = @(
             '-NoLogo',
             '-NoProfile',
@@ -314,12 +438,10 @@ jobs:
             '-ResultsRoot', $env:RESULTS_ROOT,
             '-SummaryPath', $env:SUMMARY_PATH
           )
-
           if (-not [string]::IsNullOrWhiteSpace($env:MAX_PAIRS)) {
             $args += '-MaxPairs'
             $args += $env:MAX_PAIRS
           }
-
           $modeTokens = @()
           if (-not [string]::IsNullOrWhiteSpace($env:COMPARE_MODES)) {
             $modeTokens = $env:COMPARE_MODES -split '[,\r\n;]+' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
@@ -328,48 +450,36 @@ jobs:
             $args += '-Mode'
             $args += $modeTokens
           }
-
           $includeMergeParents = [string]::Equals($env:INCLUDE_MERGE_PARENTS, 'true', [System.StringComparison]::OrdinalIgnoreCase)
           if ($includeMergeParents) {
             $args += '-IncludeMergeParents'
           }
-
           pwsh @args
-
           if (Test-Path -LiteralPath $env:SUMMARY_PATH -PathType Leaf) {
             "summary_path=$($env:SUMMARY_PATH)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
-          "results_root=$($env:RESULTS_ROOT)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Summarize history results
-        if: steps.manifest.outputs.pair_count != '0'
+        if: ${{ needs.prepare.outputs.pair_count != '0' }}
         id: summarize
         env:
           SUMMARY_PATH: ${{ steps.history.outputs.summary_path }}
           RESULTS_ROOT: ${{ steps.paths.outputs.results_root }}
+          TOOLS_ROOT: ${{ github.workspace }}\\.pr-vi-history-tools
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-
           if ([string]::IsNullOrWhiteSpace($env:SUMMARY_PATH)) {
             throw 'History summary path missing after compare execution.'
           }
-
-          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE '.pr-vi-history' 'tools'
-          $summaryScript = Join-Path $toolsRoot 'Summarize-PRVIHistory.ps1'
+          $summaryScript = Join-Path $env:TOOLS_ROOT 'tools' 'Summarize-PRVIHistory.ps1'
           if (-not (Test-Path -LiteralPath $summaryScript -PathType Leaf)) {
             throw ("Missing summary script: {0}" -f $summaryScript)
           }
-
           $markdownPath = Join-Path $env:RESULTS_ROOT 'vi-history-summary.md'
           $expandedPath = Join-Path $env:RESULTS_ROOT 'vi-history-summary-expanded.json'
-
-          pwsh -NoLogo -NoProfile -File $summaryScript `
-            -SummaryPath $env:SUMMARY_PATH `
-            -MarkdownPath $markdownPath `
-            -OutputJsonPath $expandedPath
-
+          pwsh -NoLogo -NoProfile -File $summaryScript -SummaryPath $env:SUMMARY_PATH -MarkdownPath $markdownPath -OutputJsonPath $expandedPath
           "markdown_path=$markdownPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           if (Test-Path -LiteralPath $markdownPath -PathType Leaf) {
             $markdown = Get-Content -LiteralPath $markdownPath -Raw
@@ -379,34 +489,35 @@ jobs:
             }
           }
 
-      - name: Append workflow summary
-        if: always()
-        shell: pwsh
+      - name: Collect metrics
+        id: metrics
+        if: ${{ always() }}
         env:
-          PAIR_COUNT: ${{ steps.manifest.outputs.pair_count }}
-          MARKDOWN_PATH: ${{ steps.summarize.outputs.markdown_path }}
+          SUMMARY_PATH_RAW: ${{ steps.history.outputs.summary_path }}
+        shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-
-          $pairCount = 0
-          [void][int]::TryParse(($env:PAIR_COUNT ?? '0'), [ref]$pairCount)
-
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '### PR VI history compare'
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- PR: #{0}" -f $env:PR_NUMBER)
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Changed VI pairs: **{0}**" -f $pairCount)
-
-          if ($pairCount -le 0) {
-            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
-            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'No changed `.vi` entries detected for this PR.'
-            return
+          $summaryPath = $env:SUMMARY_PATH_RAW
+          $targetCount = 0
+          $completedCount = 0
+          $diffCount = 0
+          if (-not [string]::IsNullOrWhiteSpace($summaryPath) -and (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
+            try {
+              $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json -Depth 10
+              if ($summary -and $summary.totals) {
+                if ($summary.totals.PSObject.Properties['targets']) { $targetCount = [int]$summary.totals.targets }
+                if ($summary.totals.PSObject.Properties['completed']) { $completedCount = [int]$summary.totals.completed }
+                if ($summary.totals.PSObject.Properties['diffs']) { $diffCount = [int]$summary.totals.diffs }
+              }
+            } catch {
+              Write-Warning ("Failed to parse history summary metrics: {0}" -f $_.Exception.Message)
+            }
           }
-
-          if (-not [string]::IsNullOrWhiteSpace($env:MARKDOWN_PATH) -and (Test-Path -LiteralPath $env:MARKDOWN_PATH -PathType Leaf)) {
-            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
-            Get-Content -LiteralPath $env:MARKDOWN_PATH | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
-          }
+          "summary_path=$summaryPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "target_count=$targetCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "completed_count=$completedCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "diff_count=$diffCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Upload history artifacts
         if: ${{ always() && (inputs.upload_artifact == true || inputs.upload_artifact == 'true') }}
@@ -415,20 +526,362 @@ jobs:
           name: ${{ steps.meta.outputs.artifact_name }}
           path: |
             ${{ steps.paths.outputs.results_root }}/**
+            ${{ steps.manifest.outputs.manifest_path }}
           if-no-files-found: warn
+
+      - name: Resolve windows lane status
+        id: lane
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $status = if ('${{ job.status }}' -eq 'success') { 'success' } else { 'failure' }
+          "status=$status" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+  history_linux_smoke:
+    name: History smoke (2026q1-linux)
+    needs: prepare
+    if: ${{ inputs.enable_linux_smoke == true || inputs.enable_linux_smoke == 'true' }}
+    continue-on-error: true
+    runs-on: ${{ inputs.linux_runner }}
+    timeout-minutes: 15
+    env:
+      LINUX_IMAGE: ${{ inputs.linux_image }}
+    outputs:
+      history_report_md: ${{ steps.verify.outputs.history_report_md || '' }}
+      history_report_html: ${{ steps.verify.outputs.history_report_html || '' }}
+      smoke_summary_path: ${{ steps.verify.outputs.smoke_summary_path || '' }}
+      artifact_name: ${{ steps.meta.outputs.artifact_name || '' }}
+      lane_status: ${{ steps.lane.outputs.status || 'unknown' }}
+    steps:
+      - name: Checkout workflow toolchain
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ needs.prepare.outputs.tools_repository }}
+          ref: ${{ needs.prepare.outputs.tools_ref }}
+          path: .pr-vi-history-tools
+          fetch-depth: 1
+
+      - name: Compute linux smoke artifact metadata
+        id: meta
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $name = "${{ needs.prepare.outputs.artifact_name }}-linux-smoke"
+          "artifact_name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Pull and probe NI linux image
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $dockerOs = (& docker info --format '{{.OSType}}').Trim().ToLowerInvariant()
+          if ($dockerOs -ne 'linux') {
+            throw ("Docker daemon OSType is '{0}'. Switch to Linux containers to run linux smoke lane." -f $dockerOs)
+          }
+          docker pull $env:LINUX_IMAGE
+          if ($LASTEXITCODE -ne 0) {
+            throw ("Failed to pull linux image: {0}" -f $env:LINUX_IMAGE)
+          }
+          docker run --rm --entrypoint /bin/sh $env:LINUX_IMAGE -lc 'echo ni-linux-smoke'
+          if ($LASTEXITCODE -ne 0) {
+            throw ("Failed to start linux image: {0}" -f $env:LINUX_IMAGE)
+          }
+
+      - name: Generate deterministic smoke fixture
+        id: fixture
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE '.pr-vi-history-tools' 'tools'
+          $fixtureScript = Join-Path $toolsRoot 'New-VIHistorySmokeFixture.ps1'
+          if (-not (Test-Path -LiteralPath $fixtureScript -PathType Leaf)) {
+            throw ("Missing fixture generator script: {0}" -f $fixtureScript)
+          }
+          $fixtureRoot = Join-Path $env:RUNNER_TEMP 'vi-history-linux-smoke'
+          if (Test-Path -LiteralPath $fixtureRoot) {
+            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+          pwsh -NoLogo -NoProfile -File $fixtureScript -OutputRoot $fixtureRoot -GitHubOutputPath $env:GITHUB_OUTPUT
+
+      - name: Render VI history report
+        id: render
+        env:
+          SUITE_MANIFEST_PATH: ${{ steps.fixture.outputs['suite-manifest-path'] }}
+          HISTORY_CONTEXT_PATH: ${{ steps.fixture.outputs['history-context-path'] }}
+          RESULTS_DIR: ${{ steps.fixture.outputs['results-dir'] }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE '.pr-vi-history-tools' 'tools'
+          $renderScript = Join-Path $toolsRoot 'Render-VIHistoryReport.ps1'
+          if (-not (Test-Path -LiteralPath $renderScript -PathType Leaf)) {
+            throw ("Missing renderer script: {0}" -f $renderScript)
+          }
+          pwsh -NoLogo -NoProfile -File $renderScript `
+            -ManifestPath $env:SUITE_MANIFEST_PATH `
+            -HistoryContextPath $env:HISTORY_CONTEXT_PATH `
+            -OutputDir $env:RESULTS_DIR `
+            -EmitHtml `
+            -GitHubOutputPath $env:GITHUB_OUTPUT `
+            -StepSummaryPath $env:GITHUB_STEP_SUMMARY
+
+      - name: Verify smoke contract
+        id: verify
+        env:
+          RESULTS_DIR: ${{ steps.fixture.outputs['results-dir'] }}
+          SUITE_MANIFEST_PATH: ${{ steps.fixture.outputs['suite-manifest-path'] }}
+          HISTORY_CONTEXT_PATH: ${{ steps.fixture.outputs['history-context-path'] }}
+          HISTORY_REPORT_MD: ${{ steps.render.outputs['history-report-md'] }}
+          HISTORY_REPORT_HTML: ${{ steps.render.outputs['history-report-html'] }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:HISTORY_REPORT_MD)) {
+            throw 'Renderer output history-report-md is missing.'
+          }
+          if (-not (Test-Path -LiteralPath $env:HISTORY_REPORT_MD -PathType Leaf)) {
+            throw ("Renderer markdown output does not exist: {0}" -f $env:HISTORY_REPORT_MD)
+          }
+          if ([string]::IsNullOrWhiteSpace($env:HISTORY_REPORT_HTML)) {
+            throw 'Renderer output history-report-html is missing.'
+          }
+          if (-not (Test-Path -LiteralPath $env:HISTORY_REPORT_HTML -PathType Leaf)) {
+            throw ("Renderer html output does not exist: {0}" -f $env:HISTORY_REPORT_HTML)
+          }
+
+          $markdown = Get-Content -LiteralPath $env:HISTORY_REPORT_MD -Raw
+          if ($markdown -notmatch '\| Metric \| Value \|') {
+            throw 'Markdown output missing expected metric table header: | Metric | Value |'
+          }
+          if ($markdown -notmatch '\| Mode \| Pair \| Lineage \| Base \| Head \| Diff \| Duration \(s\) \| Categories \| Buckets \| Report \| Highlights \|') {
+            throw 'Markdown output missing expected commit pair table header.'
+          }
+
+          $html = Get-Content -LiteralPath $env:HISTORY_REPORT_HTML -Raw
+          if ($html -notmatch '<th>Lineage</th>') {
+            throw 'HTML output missing expected Lineage table header.'
+          }
+          if ($html -notmatch 'data-buckets=') {
+            throw 'HTML output missing expected bucket marker attribute (data-buckets).'
+          }
+
+          $summaryPath = Join-Path $env:RESULTS_DIR 'history-linux-smoke-summary.json'
+          $summary = [ordered]@{
+            schema = 'vi-history-linux-smoke-summary@v1'
+            generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+            status = 'pass'
+            image = $env:LINUX_IMAGE
+            checks = @(
+              [ordered]@{ name = 'history-report-md output exists'; passed = $true },
+              [ordered]@{ name = 'history-report-html output exists'; passed = $true },
+              [ordered]@{ name = 'markdown metric table header'; passed = $true },
+              [ordered]@{ name = 'markdown pair table header'; passed = $true },
+              [ordered]@{ name = 'html lineage header'; passed = $true },
+              [ordered]@{ name = 'html bucket marker'; passed = $true }
+            )
+            paths = [ordered]@{
+              suiteManifestPath = $env:SUITE_MANIFEST_PATH
+              historyContextPath = $env:HISTORY_CONTEXT_PATH
+              historyReportMarkdownPath = $env:HISTORY_REPORT_MD
+              historyReportHtmlPath = $env:HISTORY_REPORT_HTML
+            }
+            hashes = [ordered]@{
+              historyReportMarkdownSha256 = (Get-FileHash -LiteralPath $env:HISTORY_REPORT_MD -Algorithm SHA256).Hash
+              historyReportHtmlSha256 = (Get-FileHash -LiteralPath $env:HISTORY_REPORT_HTML -Algorithm SHA256).Hash
+              suiteManifestSha256 = (Get-FileHash -LiteralPath $env:SUITE_MANIFEST_PATH -Algorithm SHA256).Hash
+              historyContextSha256 = (Get-FileHash -LiteralPath $env:HISTORY_CONTEXT_PATH -Algorithm SHA256).Hash
+            }
+          }
+          $summary | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $summaryPath -Encoding utf8
+          "history_report_md=$($env:HISTORY_REPORT_MD)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "history_report_html=$($env:HISTORY_REPORT_HTML)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "smoke_summary_path=$summaryPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload linux smoke artifacts
+        if: ${{ always() && (inputs.upload_artifact == true || inputs.upload_artifact == 'true') }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: |
+            ${{ steps.fixture.outputs['results-dir'] }}/**
+            ${{ steps.fixture.outputs['suite-manifest-path'] }}
+            ${{ steps.fixture.outputs['history-context-path'] }}
+            ${{ steps.verify.outputs.smoke_summary_path }}
+          if-no-files-found: warn
+
+      - name: Resolve linux lane status
+        id: lane
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $status = if ('${{ job.status }}' -eq 'success') { 'success' } else { 'failure' }
+          "status=$status" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+  finalize:
+    name: Finalize PR VI history
+    needs: [prepare, history_windows_container, history_linux_smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+      NOTE: ${{ inputs.note }}
+      ENABLE_LINUX_SMOKE: ${{ inputs.enable_linux_smoke }}
+      WINDOWS_JOB_RESULT: ${{ needs.history_windows_container.result }}
+      WINDOWS_LANE_STATUS_RAW: ${{ needs.history_windows_container.outputs.lane_status }}
+      WINDOWS_SUMMARY_PATH: ${{ needs.history_windows_container.outputs.summary_path }}
+      WINDOWS_RESULTS_ROOT: ${{ needs.history_windows_container.outputs.results_root }}
+      WINDOWS_MANIFEST_PATH: ${{ needs.history_windows_container.outputs.manifest_path }}
+      WINDOWS_PAIR_COUNT: ${{ needs.history_windows_container.outputs.pair_count }}
+      WINDOWS_TARGET_COUNT: ${{ needs.history_windows_container.outputs.target_count }}
+      WINDOWS_COMPLETED_COUNT: ${{ needs.history_windows_container.outputs.completed_count }}
+      WINDOWS_DIFF_COUNT: ${{ needs.history_windows_container.outputs.diff_count }}
+      WINDOWS_MARKDOWN_PATH: ${{ needs.history_windows_container.outputs.markdown_path }}
+      WINDOWS_MARKDOWN_ENCODED: ${{ needs.history_windows_container.outputs.markdown }}
+      WINDOWS_ARTIFACT_NAME: ${{ needs.history_windows_container.outputs.artifact_name }}
+      PREPARE_PAIR_COUNT: ${{ needs.prepare.outputs.pair_count }}
+      PREPARE_ARTIFACT_NAME: ${{ needs.prepare.outputs.artifact_name }}
+      LINUX_JOB_RESULT: ${{ needs.history_linux_smoke.result }}
+      LINUX_LANE_STATUS_RAW: ${{ needs.history_linux_smoke.outputs.lane_status }}
+      LINUX_SMOKE_SUMMARY_PATH: ${{ needs.history_linux_smoke.outputs.smoke_summary_path }}
+      PR_URL: ${{ needs.prepare.outputs.pr_url }}
+      WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      summary_path: ${{ steps.collect.outputs.summary_path }}
+      results_root: ${{ steps.collect.outputs.results_root }}
+      manifest_path: ${{ steps.collect.outputs.manifest_path }}
+      pair_count: ${{ steps.collect.outputs.pair_count }}
+      target_count: ${{ steps.collect.outputs.target_count }}
+      completed_count: ${{ steps.collect.outputs.completed_count }}
+      diff_count: ${{ steps.collect.outputs.diff_count }}
+      markdown_path: ${{ steps.collect.outputs.markdown_path }}
+      artifact_name: ${{ steps.collect.outputs.artifact_name }}
+      windows_lane_status: ${{ steps.collect.outputs.windows_lane_status }}
+      linux_lane_status: ${{ steps.collect.outputs.linux_lane_status }}
+    steps:
+      - name: Collect outputs and validate contract
+        id: collect
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $windowsResult = "$env:WINDOWS_JOB_RESULT".Trim().ToLowerInvariant()
+          $windowsLaneStatusRaw = "$env:WINDOWS_LANE_STATUS_RAW".Trim().ToLowerInvariant()
+          $windowsLaneStatus = if (-not [string]::IsNullOrWhiteSpace($windowsLaneStatusRaw)) {
+            $windowsLaneStatusRaw
+          } elseif ($windowsResult) {
+            $windowsResult
+          } else {
+            'unknown'
+          }
+
+          $pairCount = 0
+          if (-not [int]::TryParse($env:WINDOWS_PAIR_COUNT, [ref]$pairCount)) {
+            [void][int]::TryParse(($env:PREPARE_PAIR_COUNT ?? '0'), [ref]$pairCount)
+          }
+          $targetCount = 0
+          [void][int]::TryParse(($env:WINDOWS_TARGET_COUNT ?? '0'), [ref]$targetCount)
+          $completedCount = 0
+          [void][int]::TryParse(($env:WINDOWS_COMPLETED_COUNT ?? '0'), [ref]$completedCount)
+          $diffCount = 0
+          [void][int]::TryParse(($env:WINDOWS_DIFF_COUNT ?? '0'), [ref]$diffCount)
+
+          $summaryPath = $env:WINDOWS_SUMMARY_PATH
+          $resultsRoot = $env:WINDOWS_RESULTS_ROOT
+          $manifestPath = $env:WINDOWS_MANIFEST_PATH
+          $markdownPath = $env:WINDOWS_MARKDOWN_PATH
+          $artifactName = if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_ARTIFACT_NAME)) { $env:WINDOWS_ARTIFACT_NAME } else { $env:PREPARE_ARTIFACT_NAME }
+
+          if ($windowsLaneStatus -eq 'success') {
+            if ([string]::IsNullOrWhiteSpace($manifestPath)) {
+              throw 'Windows lane succeeded but manifest_path output is empty.'
+            }
+            if ($pairCount -gt 0) {
+              if ([string]::IsNullOrWhiteSpace($summaryPath)) {
+                throw 'Windows lane succeeded with VI pairs, but summary_path output is empty.'
+              }
+              if ([string]::IsNullOrWhiteSpace($markdownPath)) {
+                throw 'Windows lane succeeded with VI pairs, but markdown_path output is empty.'
+              }
+            }
+          }
+
+          $linuxEnabled = [string]::Equals($env:ENABLE_LINUX_SMOKE, 'true', [System.StringComparison]::OrdinalIgnoreCase)
+          $linuxResult = "$env:LINUX_JOB_RESULT".Trim().ToLowerInvariant()
+          $linuxLaneStatusRaw = "$env:LINUX_LANE_STATUS_RAW".Trim().ToLowerInvariant()
+          $linuxLaneStatus = if (-not $linuxEnabled) {
+            'skipped'
+          } elseif (-not [string]::IsNullOrWhiteSpace($linuxLaneStatusRaw)) {
+            $linuxLaneStatusRaw
+          } elseif (-not [string]::IsNullOrWhiteSpace($linuxResult)) {
+            $linuxResult
+          } else {
+            'unknown'
+          }
+
+          "summary_path=$summaryPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "results_root=$resultsRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "manifest_path=$manifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "pair_count=$pairCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "target_count=$targetCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "completed_count=$completedCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "diff_count=$diffCount" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "markdown_path=$markdownPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "windows_lane_status=$windowsLaneStatus" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "linux_lane_status=$linuxLaneStatus" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '### PR VI history lane summary'
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Windows lane status: **{0}**" -f $windowsLaneStatus)
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Linux lane status: **{0}**" -f $linuxLaneStatus)
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Pair count: **{0}**" -f $pairCount)
+          if (-not [string]::IsNullOrWhiteSpace($env:LINUX_SMOKE_SUMMARY_PATH)) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Linux smoke summary: `{0}`" -f $env:LINUX_SMOKE_SUMMARY_PATH)
+          }
+
+      - name: Append markdown summary
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $pairCount = 0
+          [void][int]::TryParse(($env:WINDOWS_PAIR_COUNT ?? '0'), [ref]$pairCount)
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_MARKDOWN_ENCODED)) {
+            if ($pairCount -le 0) {
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'No changed `.vi` entries detected for this PR.'
+            }
+            return
+          }
+          $markdown = $env:WINDOWS_MARKDOWN_ENCODED -replace '%0A', "`n" -replace '%0D', "`r" -replace '%25', '%'
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '### Windows lane markdown summary'
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $markdown
 
       - name: Post PR comment
         if: ${{ always() && (inputs.post_comment == true || inputs.post_comment == 'true') }}
         continue-on-error: true
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          PAIR_COUNT: ${{ steps.manifest.outputs.pair_count }}
-          MARKDOWN_ENCODED: ${{ steps.summarize.outputs.markdown }}
-          SUMMARY_PATH: ${{ steps.history.outputs.summary_path }}
-          PR_URL: ${{ steps.pr.outputs.pr_url }}
-          WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          JOB_STATUS: ${{ job.status }}
+          WINDOWS_LANE_STATUS: ${{ steps.collect.outputs.windows_lane_status }}
+          LINUX_LANE_STATUS: ${{ steps.collect.outputs.linux_lane_status }}
+          PAIR_COUNT: ${{ steps.collect.outputs.pair_count }}
+          MARKDOWN_ENCODED: ${{ env.WINDOWS_MARKDOWN_ENCODED }}
+        shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
@@ -440,10 +893,12 @@ jobs:
           $bodyLines.Add('### VI history compare') | Out-Null
           $bodyLines.Add('') | Out-Null
           $bodyLines.Add(('- Pull request: #{0}' -f $env:PR_NUMBER)) | Out-Null
+          $bodyLines.Add(('- Windows lane: **{0}**' -f $env:WINDOWS_LANE_STATUS)) | Out-Null
+          $bodyLines.Add(('- Linux smoke lane: **{0}**' -f $env:LINUX_LANE_STATUS)) | Out-Null
 
           $markdown = $null
           if ($env:MARKDOWN_ENCODED) {
-            $markdown = ($env:MARKDOWN_ENCODED -replace '%0A', "`n")
+            $markdown = ($env:MARKDOWN_ENCODED -replace '%0A', "`n" -replace '%0D', "`r" -replace '%25', '%')
           }
 
           if ($pairCount -le 0) {
@@ -454,8 +909,8 @@ jobs:
             $bodyLines.Add($markdown) | Out-Null
           } else {
             $bodyLines.Add(('- Changed VI pairs: **{0}** (summary unavailable)' -f $pairCount)) | Out-Null
-            if ($env:SUMMARY_PATH) {
-              $bodyLines.Add(('- Summary JSON: `{0}`' -f $env:SUMMARY_PATH)) | Out-Null
+            if ($env:WINDOWS_SUMMARY_PATH) {
+              $bodyLines.Add(('- Summary JSON: `{0}`' -f $env:WINDOWS_SUMMARY_PATH)) | Out-Null
             }
           }
 
@@ -464,16 +919,37 @@ jobs:
             $bodyLines.Add(('> NOTE - {0}' -f $env:NOTE)) | Out-Null
           }
 
+          if ($env:LINUX_LANE_STATUS -ne 'success' -and $env:LINUX_LANE_STATUS -ne 'skipped') {
+            $bodyLines.Add('') | Out-Null
+            $bodyLines.Add(('> WARNING - Linux smoke lane completed with status **{0}** (informational lane).' -f $env:LINUX_LANE_STATUS)) | Out-Null
+          }
+
           if (-not [string]::IsNullOrWhiteSpace($env:PR_URL)) {
             $bodyLines.Add('') | Out-Null
             $bodyLines.Add(('PR URL: {0}' -f $env:PR_URL)) | Out-Null
           }
           $bodyLines.Add(('Run details: [link]({0}).' -f $env:WORKFLOW_URL)) | Out-Null
 
-          if ($env:JOB_STATUS -ne 'success') {
+          if ($env:WINDOWS_LANE_STATUS -ne 'success') {
             $bodyLines.Add('') | Out-Null
-            $bodyLines.Add(('> WARNING - Workflow completed with status **{0}**.' -f $env:JOB_STATUS)) | Out-Null
+            $bodyLines.Add(('> WARNING - Windows lane status is **{0}**.' -f $env:WINDOWS_LANE_STATUS)) | Out-Null
           }
 
           $body = $bodyLines -join [Environment]::NewLine
           gh pr comment $env:PR_NUMBER --repo $env:GITHUB_REPOSITORY --body $body
+
+      - name: Enforce gate policy
+        if: ${{ always() }}
+        env:
+          WINDOWS_LANE_STATUS: ${{ steps.collect.outputs.windows_lane_status }}
+          LINUX_LANE_STATUS: ${{ steps.collect.outputs.linux_lane_status }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          if ($env:WINDOWS_LANE_STATUS -ne 'success') {
+            throw ("Windows lane is hard-gated and must succeed. Current status: {0}" -f $env:WINDOWS_LANE_STATUS)
+          }
+          if ([string]::Equals($env:ENABLE_LINUX_SMOKE, 'true', [System.StringComparison]::OrdinalIgnoreCase) -and $env:LINUX_LANE_STATUS -ne 'success') {
+            Write-Warning ("Linux smoke lane status is '{0}' (informational, soft-gated)." -f $env:LINUX_LANE_STATUS)
+          }

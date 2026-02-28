@@ -67,6 +67,26 @@ function Normalize-ExistingPath {
   try { return (Resolve-Path -LiteralPath $Candidate -ErrorAction Stop).Path } catch { return $Candidate }
 }
 
+function Resolve-NIWindowsContainerCompareScript {
+  param([string]$PrimaryRoot, [string]$SecondaryRoot)
+
+  $candidates = New-Object System.Collections.Generic.List[string]
+  if (-not [string]::IsNullOrWhiteSpace($PrimaryRoot)) {
+    $candidates.Add((Join-Path (Join-Path $PrimaryRoot 'tools') 'Run-NIWindowsContainerCompare.ps1')) | Out-Null
+  }
+  if (-not [string]::IsNullOrWhiteSpace($SecondaryRoot) -and $SecondaryRoot -ne $PrimaryRoot) {
+    $candidates.Add((Join-Path (Join-Path $SecondaryRoot 'tools') 'Run-NIWindowsContainerCompare.ps1')) | Out-Null
+  }
+
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      return (Resolve-Path -LiteralPath $candidate).Path
+    }
+  }
+
+  return $null
+}
+
 function Get-IncludedAttributesFromReport {
   param([string]$ReportPath)
   if ([string]::IsNullOrWhiteSpace($ReportPath)) { return @() }
@@ -240,15 +260,26 @@ if ($RenderReport.IsPresent -and $reportFormatEffective -ne 'html') {
   $reportFormatEffective = 'html'
 }
 $renderReportRequested = ($reportFormatEffective -eq 'html')
-$detailRequested = $Detailed.IsPresent -or $renderReportRequested -or ($reportFormatEffective -ne 'html')
-Write-Host ("[Debug] detailRequested={0} renderReportRequested={1} reportFormat={2}" -f $detailRequested, $renderReportRequested, $reportFormatEffective)
 $scriptsRoot = Resolve-CompareVIScriptsRoot -PrimaryRoot $repoRoot
+$compareBackendRaw = [System.Environment]::GetEnvironmentVariable('PR_VI_HISTORY_COMPARE_BACKEND','Process')
+$compareBackend = if ([string]::IsNullOrWhiteSpace($compareBackendRaw)) { 'host' } else { $compareBackendRaw.Trim().ToLowerInvariant() }
+$useNIWindowsContainerBackend = ($compareBackend -eq 'ni-windows-container')
+$windowsContainerImage = [System.Environment]::GetEnvironmentVariable('PR_VI_HISTORY_WINDOWS_IMAGE','Process')
+$detailRequested = $Detailed.IsPresent -or $renderReportRequested -or ($reportFormatEffective -ne 'html') -or $useNIWindowsContainerBackend
+Write-Host ("[Debug] backend={0} detailRequested={1} renderReportRequested={2} reportFormat={3}" -f $compareBackend, $detailRequested, $renderReportRequested, $reportFormatEffective)
 $flagTokens = Split-ArgString -Value $LvCompareArgs
 $customInvokeProvided = -not [string]::IsNullOrWhiteSpace($InvokeScriptPath)
 $lvComparePathResolved = Normalize-ExistingPath $LvComparePath
 $labviewExeResolved    = Normalize-ExistingPath $LabVIEWExePath
 $invokeScriptResolved  = $null
-if ($detailRequested -or $InvokeScriptPath) {
+$containerCompareScript = $null
+if ($useNIWindowsContainerBackend) {
+  $containerCompareScript = Resolve-NIWindowsContainerCompareScript -PrimaryRoot $repoRoot -SecondaryRoot $scriptsRoot
+  if ([string]::IsNullOrWhiteSpace($containerCompareScript) -or -not (Test-Path -LiteralPath $containerCompareScript -PathType Leaf)) {
+    throw "Run-NIWindowsContainerCompare.ps1 not found. Expected under tools/ in the workflow toolchain."
+  }
+}
+if (($detailRequested -or $InvokeScriptPath) -and -not $useNIWindowsContainerBackend) {
   if (-not $InvokeScriptPath) {
     $invokeCandidates = @(
       Join-Path (Join-Path $repoRoot 'tools') 'Invoke-LVCompare.ps1'
@@ -319,94 +350,200 @@ $cliHighlights = @()
 $cliStdoutPreview = @()
 $detailPaths = [ordered]@{}
 $includedAttributes = @()
+$captureBaseValue = $null
+$captureHeadValue = $null
 
 if ($detailRequested) {
-  $invokeArgs = @('-NoLogo','-NoProfile','-File', $invokeScriptResolved, '-BaseVi', $base, '-HeadVi', $head, '-OutputDir', $artifactDir, '-NoiseProfile', 'full', '-Quiet')
-  if ($renderReportRequested) { $invokeArgs += '-RenderReport' }
-  if ($lvComparePathResolved) { $invokeArgs += '-LVComparePath'; $invokeArgs += $lvComparePathResolved }
-  if ($labviewExeResolved) { $invokeArgs += '-LabVIEWExePath'; $invokeArgs += $labviewExeResolved }
-  if ($customInvokeProvided -and $invokeFlagTokens -and $invokeFlagTokens.Length -gt 0) {
-    $invokeArgs += '-Flags'
-    foreach ($token in $invokeFlagTokens) { $invokeArgs += $token }
-  }
-  if ($ReplaceFlags) { $invokeArgs += '-ReplaceFlags' }
-  if ($LeakCheck.IsPresent) {
-    $invokeArgs += '-LeakCheck'
-    $invokeArgs += '-LeakGraceSeconds'; $invokeArgs += $LeakGraceSeconds
-    if (-not [string]::IsNullOrWhiteSpace($LeakJsonPath)) {
-      $invokeArgs += '-LeakJsonPath'; $invokeArgs += $LeakJsonPath
+  if ($useNIWindowsContainerBackend) {
+    $containerArgs = @(
+      '-NoLogo','-NoProfile','-File', $containerCompareScript,
+      '-BaseVi', $base,
+      '-HeadVi', $head,
+      '-ReportType', $reportFormatEffective,
+      '-ReportPath', $reportFile,
+      '-TimeoutSeconds', '600'
+    )
+    if (-not [string]::IsNullOrWhiteSpace($windowsContainerImage)) {
+      $containerArgs += '-Image'
+      $containerArgs += $windowsContainerImage
     }
-  }
-
-  $previousReportFormat = [System.Environment]::GetEnvironmentVariable('COMPAREVI_REPORT_FORMAT','Process')
-  $previousFlags = [System.Environment]::GetEnvironmentVariable('COMPAREVI_LVCOMPARE_FLAGS','Process')
-  try {
-    if ($reportFormatEffective) {
-      [System.Environment]::SetEnvironmentVariable('COMPAREVI_REPORT_FORMAT', $reportFormatEffective, 'Process')
-    } else {
-      [System.Environment]::SetEnvironmentVariable('COMPAREVI_REPORT_FORMAT', $null, 'Process')
+    if ($labviewExeResolved) {
+      $containerArgs += '-LabVIEWPath'
+      $containerArgs += $labviewExeResolved
     }
     if ($invokeFlagTokens -and $invokeFlagTokens.Length -gt 0) {
-      [System.Environment]::SetEnvironmentVariable('COMPAREVI_LVCOMPARE_FLAGS', ($invokeFlagTokens -join "`n"), 'Process')
-    } else {
-      [System.Environment]::SetEnvironmentVariable('COMPAREVI_LVCOMPARE_FLAGS', $null, 'Process')
+      $containerArgs += '-Flags'
+      foreach ($token in $invokeFlagTokens) { $containerArgs += $token }
     }
-    $invokeResult = Invoke-PwshProcess -Arguments $invokeArgs -QuietOutput:$Quiet
-  }
-  finally {
-    [System.Environment]::SetEnvironmentVariable('COMPAREVI_REPORT_FORMAT', $previousReportFormat, 'Process')
-    [System.Environment]::SetEnvironmentVariable('COMPAREVI_LVCOMPARE_FLAGS', $previousFlags, 'Process')
-  }
-  $capturePath = Join-Path $artifactDir 'lvcompare-capture.json'
-  $stdoutPath  = Join-Path $artifactDir 'lvcompare-stdout.txt'
-  $stderrPath  = Join-Path $artifactDir 'lvcompare-stderr.txt'
-  $reportPath  = $reportFile
-  $imagesDir   = Join-Path $artifactDir 'cli-images'
 
-  $capture = $null
-  if (Test-Path -LiteralPath $capturePath) {
-    $capture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json -Depth 8
-  }
-  if (-not $capture) {
-    throw "lvcompare-capture.json not produced (exit code $($invokeResult.ExitCode)). Inspect $artifactDir for details."
-  }
+    $containerResult = Invoke-PwshProcess -Arguments $containerArgs -QuietOutput:$Quiet
 
-  $cliExit = if ($capture.exitCode -ne $null) { [int]$capture.exitCode } else { [int]$invokeResult.ExitCode }
-  $cliDiff = ($cliExit -eq 1)
-  $cliCommand = if ($capture.command) { [string]$capture.command } else { $null }
-  $cliPath = if ($capture.cliPath) { [string]$capture.cliPath } else { $lvComparePathResolved }
-  if ($capture.seconds -ne $null) {
-    $cliDurationSeconds = [double]$capture.seconds
-    $cliDurationNanoseconds = [long]([Math]::Round($cliDurationSeconds * 1e9))
-  }
-  if ($capture.args) { $cliArgsRecorded = @($capture.args | ForEach-Object { [string]$_ }) }
+    $capturePath = Join-Path $artifactDir 'ni-windows-container-capture.json'
+    $stdoutPath  = Join-Path $artifactDir 'ni-windows-container-stdout.txt'
+    $stderrPath  = Join-Path $artifactDir 'ni-windows-container-stderr.txt'
+    $reportPath  = $reportFile
+    $imagesDir   = $null
 
-  if ($cliExit -notin @(0,1)) {
-    throw "LVCompare failed with exit code $cliExit. See $capturePath for details."
-  }
+    $capture = $null
+    if (Test-Path -LiteralPath $capturePath -PathType Leaf) {
+      $capture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json -Depth 8
+    }
+    if (-not $capture) {
+      throw "ni-windows-container-capture.json not produced (exit code $($containerResult.ExitCode)). Inspect $artifactDir for details."
+    }
 
-  if ($capture.PSObject.Properties['environment'] -and $capture.environment -and $capture.environment.PSObject.Properties['cli']) {
-    $cliNode = $capture.environment.cli
-    if ($cliNode.PSObject.Properties['artifacts'] -and $cliNode.artifacts) {
-      $artifactSummary = [ordered]@{}
-      foreach ($prop in $cliNode.artifacts.PSObject.Properties) {
-        if ($prop.Name -eq 'images' -and $prop.Value) {
-          $images = @()
-          foreach ($img in @($prop.Value)) {
-            if (-not $img) { continue }
-            $images += [ordered]@{
-              index      = $img.index
-              mimeType   = $img.mimeType
-              byteLength = $img.byteLength
-              savedPath  = $img.savedPath
+    $cliExit = if ($capture.exitCode -ne $null) { [int]$capture.exitCode } else { [int]$containerResult.ExitCode }
+    $cliDiff = if ($capture.PSObject.Properties['status'] -and $capture.status) { [string]::Equals([string]$capture.status, 'diff', [System.StringComparison]::OrdinalIgnoreCase) } else { $cliExit -eq 1 }
+    $cliCommand = if ($capture.PSObject.Properties['command'] -and $capture.command) { [string]$capture.command } else { 'Run-NIWindowsContainerCompare.ps1' }
+    $cliPath = 'LabVIEWCLI(container)'
+    if ($capture.PSObject.Properties['image'] -and $capture.image) {
+      $cliArtifacts = [pscustomobject]@{ containerImage = [string]$capture.image }
+    }
+    if ($capture.PSObject.Properties['baseVi']) { $captureBaseValue = $capture.baseVi }
+    if ($capture.PSObject.Properties['headVi']) { $captureHeadValue = $capture.headVi }
+
+    if ($cliExit -notin @(0,1)) {
+      $failureMessage = if ($capture.PSObject.Properties['message'] -and $capture.message) { [string]$capture.message } else { "Container compare failed with exit code $cliExit." }
+      throw $failureMessage
+    }
+  } else {
+    $invokeArgs = @('-NoLogo','-NoProfile','-File', $invokeScriptResolved, '-BaseVi', $base, '-HeadVi', $head, '-OutputDir', $artifactDir, '-NoiseProfile', 'full', '-Quiet')
+    if ($renderReportRequested) { $invokeArgs += '-RenderReport' }
+    if ($lvComparePathResolved) { $invokeArgs += '-LVComparePath'; $invokeArgs += $lvComparePathResolved }
+    if ($labviewExeResolved) { $invokeArgs += '-LabVIEWExePath'; $invokeArgs += $labviewExeResolved }
+    if ($customInvokeProvided -and $invokeFlagTokens -and $invokeFlagTokens.Length -gt 0) {
+      $invokeArgs += '-Flags'
+      foreach ($token in $invokeFlagTokens) { $invokeArgs += $token }
+    }
+    if ($ReplaceFlags) { $invokeArgs += '-ReplaceFlags' }
+    if ($LeakCheck.IsPresent) {
+      $invokeArgs += '-LeakCheck'
+      $invokeArgs += '-LeakGraceSeconds'; $invokeArgs += $LeakGraceSeconds
+      if (-not [string]::IsNullOrWhiteSpace($LeakJsonPath)) {
+        $invokeArgs += '-LeakJsonPath'; $invokeArgs += $LeakJsonPath
+      }
+    }
+
+    $previousReportFormat = [System.Environment]::GetEnvironmentVariable('COMPAREVI_REPORT_FORMAT','Process')
+    $previousFlags = [System.Environment]::GetEnvironmentVariable('COMPAREVI_LVCOMPARE_FLAGS','Process')
+    try {
+      if ($reportFormatEffective) {
+        [System.Environment]::SetEnvironmentVariable('COMPAREVI_REPORT_FORMAT', $reportFormatEffective, 'Process')
+      } else {
+        [System.Environment]::SetEnvironmentVariable('COMPAREVI_REPORT_FORMAT', $null, 'Process')
+      }
+      if ($invokeFlagTokens -and $invokeFlagTokens.Length -gt 0) {
+        [System.Environment]::SetEnvironmentVariable('COMPAREVI_LVCOMPARE_FLAGS', ($invokeFlagTokens -join "`n"), 'Process')
+      } else {
+        [System.Environment]::SetEnvironmentVariable('COMPAREVI_LVCOMPARE_FLAGS', $null, 'Process')
+      }
+      $invokeResult = Invoke-PwshProcess -Arguments $invokeArgs -QuietOutput:$Quiet
+    }
+    finally {
+      [System.Environment]::SetEnvironmentVariable('COMPAREVI_REPORT_FORMAT', $previousReportFormat, 'Process')
+      [System.Environment]::SetEnvironmentVariable('COMPAREVI_LVCOMPARE_FLAGS', $previousFlags, 'Process')
+    }
+    $capturePath = Join-Path $artifactDir 'lvcompare-capture.json'
+    $stdoutPath  = Join-Path $artifactDir 'lvcompare-stdout.txt'
+    $stderrPath  = Join-Path $artifactDir 'lvcompare-stderr.txt'
+    $reportPath  = $reportFile
+    $imagesDir   = Join-Path $artifactDir 'cli-images'
+
+    $capture = $null
+    if (Test-Path -LiteralPath $capturePath) {
+      $capture = Get-Content -LiteralPath $capturePath -Raw | ConvertFrom-Json -Depth 8
+    }
+    if (-not $capture) {
+      throw "lvcompare-capture.json not produced (exit code $($invokeResult.ExitCode)). Inspect $artifactDir for details."
+    }
+
+    $cliExit = if ($capture.exitCode -ne $null) { [int]$capture.exitCode } else { [int]$invokeResult.ExitCode }
+    $cliDiff = ($cliExit -eq 1)
+    $cliCommand = if ($capture.command) { [string]$capture.command } else { $null }
+    $cliPath = if ($capture.cliPath) { [string]$capture.cliPath } else { $lvComparePathResolved }
+    if ($capture.seconds -ne $null) {
+      $cliDurationSeconds = [double]$capture.seconds
+      $cliDurationNanoseconds = [long]([Math]::Round($cliDurationSeconds * 1e9))
+    }
+    if ($capture.args) { $cliArgsRecorded = @($capture.args | ForEach-Object { [string]$_ }) }
+    if ($capture.PSObject.Properties['base']) { $captureBaseValue = $capture.base }
+    if ($capture.PSObject.Properties['head']) { $captureHeadValue = $capture.head }
+
+    if ($cliExit -notin @(0,1)) {
+      throw "LVCompare failed with exit code $cliExit. See $capturePath for details."
+    }
+
+    if ($capture.PSObject.Properties['environment'] -and $capture.environment -and $capture.environment.PSObject.Properties['cli']) {
+      $cliNode = $capture.environment.cli
+      if ($cliNode.PSObject.Properties['artifacts'] -and $cliNode.artifacts) {
+        $artifactSummary = [ordered]@{}
+        foreach ($prop in $cliNode.artifacts.PSObject.Properties) {
+          if ($prop.Name -eq 'images' -and $prop.Value) {
+            $images = @()
+            foreach ($img in @($prop.Value)) {
+              if (-not $img) { continue }
+              $images += [ordered]@{
+                index      = $img.index
+                mimeType   = $img.mimeType
+                byteLength = $img.byteLength
+                savedPath  = $img.savedPath
+              }
             }
+            if ($images.Count -gt 0) { $artifactSummary.images = $images }
+          } else {
+            $artifactSummary[$prop.Name] = $prop.Value
           }
-          if ($images.Count -gt 0) { $artifactSummary.images = $images }
-        } else {
-          $artifactSummary[$prop.Name] = $prop.Value
+        }
+        if ($artifactSummary.Count -gt 0) { $cliArtifacts = [pscustomobject]$artifactSummary }
+      }
+    }
+
+    $leakResolvedPath = $null
+    if ($LeakCheck.IsPresent) {
+      $candidateLeakPaths = @()
+      if (-not [string]::IsNullOrWhiteSpace($LeakJsonPath)) {
+        $candidateLeakPaths += $LeakJsonPath
+      }
+      $candidateLeakPaths += (Join-Path $artifactDir 'lvcompare-leak.json')
+      foreach ($candidatePath in $candidateLeakPaths) {
+        if (-not $candidatePath) { continue }
+        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+          try {
+            $leakResolvedPath = (Resolve-Path -LiteralPath $candidatePath).Path
+          } catch {
+            $leakResolvedPath = $candidatePath
+          }
+          break
         }
       }
-      if ($artifactSummary.Count -gt 0) { $cliArtifacts = [pscustomobject]$artifactSummary }
+      if ($leakResolvedPath) {
+        $detailPaths.leakJson = $leakResolvedPath
+        try {
+          $leakInfo = Get-Content -LiteralPath $leakResolvedPath -Raw | ConvertFrom-Json -Depth 6
+        } catch {
+          $leakInfo = $null
+        }
+        if ($leakInfo) {
+          if ($cliArtifacts) {
+            $cliArtifacts | Add-Member -NotePropertyName 'leakDetected' -NotePropertyValue ([bool]$leakInfo.leakDetected) -Force
+          } else {
+            $cliArtifacts = [pscustomobject]@{
+              leakDetected = [bool]$leakInfo.leakDetected
+            }
+          }
+          if ($cliArtifacts) {
+            if ($leakInfo.PSObject.Properties['graceSeconds']) {
+              $cliArtifacts | Add-Member -NotePropertyName 'graceSeconds' -NotePropertyValue ([double]$leakInfo.graceSeconds) -Force
+            }
+            if ($leakInfo.PSObject.Properties['processes']) {
+              $cliArtifacts | Add-Member -NotePropertyName 'processes' -NotePropertyValue $leakInfo.processes -Force
+            }
+            if ($leakInfo.PSObject.Properties['schema']) {
+              $cliArtifacts | Add-Member -NotePropertyName 'leakSchema' -NotePropertyValue $leakInfo.schema -Force
+            }
+          }
+        }
+      }
     }
   }
 
@@ -425,54 +562,6 @@ if ($detailRequested) {
     }
   }
 
-  $leakResolvedPath = $null
-  if ($LeakCheck.IsPresent) {
-    $candidateLeakPaths = @()
-    if (-not [string]::IsNullOrWhiteSpace($LeakJsonPath)) {
-      $candidateLeakPaths += $LeakJsonPath
-    }
-    $candidateLeakPaths += (Join-Path $artifactDir 'lvcompare-leak.json')
-    foreach ($candidatePath in $candidateLeakPaths) {
-      if (-not $candidatePath) { continue }
-      if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
-        try {
-          $leakResolvedPath = (Resolve-Path -LiteralPath $candidatePath).Path
-        } catch {
-          $leakResolvedPath = $candidatePath
-        }
-        break
-      }
-    }
-    if ($leakResolvedPath) {
-      $detailPaths.leakJson = $leakResolvedPath
-      try {
-        $leakInfo = Get-Content -LiteralPath $leakResolvedPath -Raw | ConvertFrom-Json -Depth 6
-      } catch {
-        $leakInfo = $null
-      }
-      if ($leakInfo) {
-        if ($cliArtifacts) {
-          $cliArtifacts | Add-Member -NotePropertyName 'leakDetected' -NotePropertyValue ([bool]$leakInfo.leakDetected) -Force
-        } else {
-          $cliArtifacts = [pscustomobject]@{
-            leakDetected = [bool]$leakInfo.leakDetected
-          }
-        }
-        if ($cliArtifacts) {
-          if ($leakInfo.PSObject.Properties['graceSeconds']) {
-            $cliArtifacts | Add-Member -NotePropertyName 'graceSeconds' -NotePropertyValue ([double]$leakInfo.graceSeconds) -Force
-          }
-          if ($leakInfo.PSObject.Properties['processes']) {
-            $cliArtifacts | Add-Member -NotePropertyName 'processes' -NotePropertyValue $leakInfo.processes -Force
-          }
-          if ($leakInfo.PSObject.Properties['schema']) {
-            $cliArtifacts | Add-Member -NotePropertyName 'leakSchema' -NotePropertyValue $leakInfo.schema -Force
-          }
-        }
-      }
-    }
-  }
-
   if (Test-Path -LiteralPath $capturePath) { $detailPaths.captureJson = (Resolve-Path -LiteralPath $capturePath).Path }
   if (Test-Path -LiteralPath $stdoutPath)  { $detailPaths.stdout       = (Resolve-Path -LiteralPath $stdoutPath).Path }
   if (Test-Path -LiteralPath $stderrPath)  { $detailPaths.stderr       = (Resolve-Path -LiteralPath $stderrPath).Path }
@@ -484,7 +573,9 @@ if ($detailRequested) {
       $detailPaths.reportHtml = $reportResolved
     }
   }
-  if (Test-Path -LiteralPath $imagesDir)   { $detailPaths.imagesDir    = (Resolve-Path -LiteralPath $imagesDir).Path }
+  if ($imagesDir -and (Test-Path -LiteralPath $imagesDir)) {
+    $detailPaths.imagesDir = (Resolve-Path -LiteralPath $imagesDir).Path
+  }
   if ($reportFormatEffective -eq 'html' -and $reportResolved) { $includedAttributes = Get-IncludedAttributesFromReport -ReportPath $reportResolved }
 
   $execObject = [ordered]@{
@@ -498,8 +589,8 @@ if ($detailRequested) {
     cwd         = $repoRoot
     duration_s  = $cliDurationSeconds
     duration_ns = $cliDurationNanoseconds
-    base        = $capture.base
-    head        = $capture.head
+    base        = if ($captureBaseValue) { $captureBaseValue } else { $base }
+    head        = if ($captureHeadValue) { $captureHeadValue } else { $head }
   }
   $execObject | ConvertTo-Json -Depth 6 | Out-File -FilePath $execPath -Encoding utf8
 }

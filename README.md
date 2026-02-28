@@ -35,11 +35,13 @@ jobs:
       include_merge_parents: false
       upload_artifact: true
       post_comment: true
+      toolchain_ref: develop
     secrets: inherit
 ```
 
 ## Notes
 
 - This repository is intentionally thin and delegates execution to
-  `compare-vi-cli-action` to avoid duplicated LabVIEW history logic.
+  `compare-vi-cli-action` scripts (`toolchain_ref`) to avoid duplicated LabVIEW
+  history logic.
 - Once a stable tag is published, prefer pinning consumers to `@v1`.

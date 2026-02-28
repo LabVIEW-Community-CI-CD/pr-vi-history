@@ -47,6 +47,11 @@ on:
         required: false
         default: ''
         type: string
+      toolchain_ref:
+        description: 'compare-vi-cli-action ref to source scripts from'
+        required: false
+        default: 'develop'
+        type: string
   workflow_call:
     inputs:
       pr_number:
@@ -93,6 +98,11 @@ on:
         required: false
         default: ''
         type: string
+      toolchain_ref:
+        description: 'compare-vi-cli-action ref to source scripts from'
+        required: false
+        default: 'develop'
+        type: string
     outputs:
       summary_path:
         description: 'Absolute path to pr-vi-history-summary@v1 json'
@@ -132,15 +142,341 @@ concurrency:
 
 jobs:
   history:
-    uses: svelderrainruiz/compare-vi-cli-action/.github/workflows/pr-vi-history-reusable.yml@develop
-    with:
-      pr_number: ${{ inputs.pr_number }}
-      fetch_depth: ${{ inputs.fetch_depth }}
-      max_pairs: ${{ inputs.max_pairs }}
-      compare_modes: ${{ inputs.compare_modes }}
-      include_merge_parents: ${{ inputs.include_merge_parents }}
-      results_root: ${{ inputs.results_root }}
-      upload_artifact: ${{ inputs.upload_artifact }}
-      post_comment: ${{ inputs.post_comment }}
-      note: ${{ inputs.note }}
-    secrets: inherit
+    name: PR VI history compare
+    runs-on: [self-hosted, Windows, X64]
+    outputs:
+      summary_path: ${{ steps.history.outputs.summary_path || '' }}
+      results_root: ${{ steps.paths.outputs.results_root }}
+      manifest_path: ${{ steps.manifest.outputs.manifest_path }}
+      pair_count: ${{ steps.manifest.outputs.pair_count || '0' }}
+      target_count: ${{ steps.summarize.outputs.target_count || '0' }}
+      completed_count: ${{ steps.summarize.outputs.completed_count || '0' }}
+      diff_count: ${{ steps.summarize.outputs.diff_count || '0' }}
+      markdown_path: ${{ steps.summarize.outputs.markdown_path || '' }}
+      artifact_name: ${{ steps.meta.outputs.artifact_name }}
+    env:
+      PR_NUMBER: ${{ inputs.pr_number }}
+      FETCH_DEPTH: ${{ inputs.fetch_depth }}
+      MAX_PAIRS: ${{ inputs.max_pairs }}
+      COMPARE_MODES: ${{ inputs.compare_modes }}
+      INCLUDE_MERGE_PARENTS: ${{ inputs.include_merge_parents }}
+      RESULTS_ROOT_INPUT: ${{ inputs.results_root }}
+      NOTE: ${{ inputs.note }}
+      TOOLCHAIN_REF: ${{ inputs.toolchain_ref }}
+    steps:
+      - name: Compute artifact metadata
+        id: meta
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $artifactName = "pr-vi-history-$($env:PR_NUMBER)"
+          "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Resolve results paths
+        id: paths
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $rootInput = if ([string]::IsNullOrWhiteSpace($env:RESULTS_ROOT_INPUT)) { 'tests/results/pr-vi-history' } else { $env:RESULTS_ROOT_INPUT }
+          $resultsRoot = if ([System.IO.Path]::IsPathRooted($rootInput)) { $rootInput } else { Join-Path $env:GITHUB_WORKSPACE $rootInput }
+          New-Item -ItemType Directory -Path $resultsRoot -Force | Out-Null
+          $resultsRoot = (Resolve-Path -LiteralPath $resultsRoot).Path
+
+          $manifestPath = Join-Path $resultsRoot 'vi-history-manifest.json'
+          $summaryPath = Join-Path $resultsRoot 'vi-history-summary.json'
+
+          "results_root=$resultsRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "manifest_path=$manifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "summary_path=$summaryPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Resolve pull request metadata
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_SLUG: ${{ github.repository }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:PR_NUMBER)) {
+            throw 'Input pr_number is required.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:REPO_SLUG)) {
+            throw 'Unable to determine repository slug from github.repository.'
+          }
+
+          $json = gh pr view $env:PR_NUMBER --repo $env:REPO_SLUG --json number,url,baseRefName,baseRefOid,headRefName,headRefOid
+          $info = $json | ConvertFrom-Json
+          if (-not $info) {
+            throw ("Unable to load pull request metadata for #{0}" -f $env:PR_NUMBER)
+          }
+
+          "pr_number=$($info.number)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "pr_url=$($info.url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "base_sha=$($info.baseRefOid)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "head_sha=$($info.headRefOid)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "base_ref=$($info.baseRefName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "head_ref=$($info.headRefName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout compare toolchain
+        uses: actions/checkout@v5
+        with:
+          repository: svelderrainruiz/compare-vi-cli-action
+          ref: ${{ env.TOOLCHAIN_REF || 'develop' }}
+          path: .tools/compare-vi-cli-action
+          fetch-depth: 1
+
+      - name: Resolve toolchain root
+        id: tools
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $toolsRoot = Join-Path $env:GITHUB_WORKSPACE '.tools/compare-vi-cli-action'
+          if (-not (Test-Path -LiteralPath $toolsRoot -PathType Container)) {
+            throw ("Toolchain checkout missing at: {0}" -f $toolsRoot)
+          }
+          $toolsRoot = (Resolve-Path -LiteralPath $toolsRoot).Path
+          "tools_root=$toolsRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Checkout pull request head
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $fetchDepth = 20
+          if (-not [string]::IsNullOrWhiteSpace($env:FETCH_DEPTH)) {
+            $parsed = 0
+            if ([int]::TryParse($env:FETCH_DEPTH, [ref]$parsed) -and $parsed -gt 0) {
+              $fetchDepth = $parsed
+            }
+          }
+          $prNumber = $env:PR_NUMBER
+          if ([string]::IsNullOrWhiteSpace($prNumber)) {
+            throw 'Missing PR number while fetching pull request head.'
+          }
+
+          git fetch --no-tags --depth=$fetchDepth origin ("pull/{0}/head:pr-{0}-head" -f $prNumber)
+          git checkout --detach ("pr-{0}-head" -f $prNumber)
+          git branch -D ("pr-{0}-head" -f $prNumber) 2>$null | Out-Null
+
+      - name: Generate VI diff manifest
+        id: manifest
+        env:
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          MANIFEST_PATH: ${{ steps.paths.outputs.manifest_path }}
+          TOOLS_ROOT: ${{ steps.tools.outputs.tools_root }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          pwsh -NoLogo -NoProfile -File (Join-Path $env:TOOLS_ROOT 'tools' 'Get-PRVIDiffManifest.ps1') `
+            -BaseRef $env:BASE_SHA `
+            -HeadRef $env:HEAD_SHA `
+            -OutputPath $env:MANIFEST_PATH
+
+          if (-not (Test-Path -LiteralPath $env:MANIFEST_PATH -PathType Leaf)) {
+            throw ("Manifest generation failed: {0}" -f $env:MANIFEST_PATH)
+          }
+
+          $pairs = 0
+          $content = Get-Content -LiteralPath $env:MANIFEST_PATH -Raw
+          if (-not [string]::IsNullOrWhiteSpace($content)) {
+            try {
+              $json = $content | ConvertFrom-Json -ErrorAction Stop
+              if ($json -and $json.pairs -is [System.Collections.IEnumerable]) {
+                $pairs = @($json.pairs).Count
+              }
+            } catch {
+              throw ("Manifest parse failure at {0}: {1}" -f $env:MANIFEST_PATH, $_.Exception.Message)
+            }
+          }
+
+          "manifest_path=$($env:MANIFEST_PATH)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "pair_count=$pairs" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Run VI history compare
+        if: steps.manifest.outputs.pair_count != '0'
+        id: history
+        env:
+          MANIFEST_PATH: ${{ steps.manifest.outputs.manifest_path }}
+          RESULTS_ROOT: ${{ steps.paths.outputs.results_root }}
+          SUMMARY_PATH: ${{ steps.paths.outputs.summary_path }}
+          TOOLS_ROOT: ${{ steps.tools.outputs.tools_root }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $args = @(
+            '-NoLogo',
+            '-NoProfile',
+            '-File', (Join-Path $env:TOOLS_ROOT 'tools' 'Invoke-PRVIHistory.ps1'),
+            '-ManifestPath', $env:MANIFEST_PATH,
+            '-ResultsRoot', $env:RESULTS_ROOT,
+            '-SummaryPath', $env:SUMMARY_PATH
+          )
+
+          if (-not [string]::IsNullOrWhiteSpace($env:MAX_PAIRS)) {
+            $args += '-MaxPairs'
+            $args += $env:MAX_PAIRS
+          }
+
+          $modeTokens = @()
+          if (-not [string]::IsNullOrWhiteSpace($env:COMPARE_MODES)) {
+            $modeTokens = $env:COMPARE_MODES -split '[,\r\n;]+' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          }
+          if ($modeTokens.Count -gt 0) {
+            $args += '-Mode'
+            $args += $modeTokens
+          }
+
+          $includeMergeParents = [string]::Equals($env:INCLUDE_MERGE_PARENTS, 'true', [System.StringComparison]::OrdinalIgnoreCase)
+          if ($includeMergeParents) {
+            $args += '-IncludeMergeParents'
+          }
+
+          pwsh @args
+
+          if (Test-Path -LiteralPath $env:SUMMARY_PATH -PathType Leaf) {
+            "summary_path=$($env:SUMMARY_PATH)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+          "results_root=$($env:RESULTS_ROOT)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Summarize history results
+        if: steps.manifest.outputs.pair_count != '0'
+        id: summarize
+        env:
+          SUMMARY_PATH: ${{ steps.history.outputs.summary_path }}
+          RESULTS_ROOT: ${{ steps.paths.outputs.results_root }}
+          TOOLS_ROOT: ${{ steps.tools.outputs.tools_root }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:SUMMARY_PATH)) {
+            throw 'History summary path missing after compare execution.'
+          }
+
+          $markdownPath = Join-Path $env:RESULTS_ROOT 'vi-history-summary.md'
+          $expandedPath = Join-Path $env:RESULTS_ROOT 'vi-history-summary-expanded.json'
+
+          pwsh -NoLogo -NoProfile -File (Join-Path $env:TOOLS_ROOT 'tools' 'Summarize-PRVIHistory.ps1') `
+            -SummaryPath $env:SUMMARY_PATH `
+            -MarkdownPath $markdownPath `
+            -OutputJsonPath $expandedPath
+
+          "markdown_path=$markdownPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Append workflow summary
+        if: always()
+        shell: pwsh
+        env:
+          PAIR_COUNT: ${{ steps.manifest.outputs.pair_count }}
+          MARKDOWN_PATH: ${{ steps.summarize.outputs.markdown_path }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $pairCount = 0
+          [void][int]::TryParse(($env:PAIR_COUNT ?? '0'), [ref]$pairCount)
+
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '### PR VI history compare'
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- PR: #{0}" -f $env:PR_NUMBER)
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Changed VI pairs: **{0}**" -f $pairCount)
+
+          if ($pairCount -le 0) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'No changed `.vi` entries detected for this PR.'
+            return
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:MARKDOWN_PATH) -and (Test-Path -LiteralPath $env:MARKDOWN_PATH -PathType Leaf)) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
+            Get-Content -LiteralPath $env:MARKDOWN_PATH | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload history artifacts
+        if: ${{ always() && (inputs.upload_artifact == true || inputs.upload_artifact == 'true') }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.meta.outputs.artifact_name }}
+          path: |
+            ${{ steps.paths.outputs.results_root }}/**
+          if-no-files-found: warn
+
+      - name: Post PR comment
+        if: ${{ always() && (inputs.post_comment == true || inputs.post_comment == 'true') }}
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAIR_COUNT: ${{ steps.manifest.outputs.pair_count }}
+          MARKDOWN_ENCODED: ${{ steps.summarize.outputs.markdown }}
+          SUMMARY_PATH: ${{ steps.history.outputs.summary_path }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
+          WORKFLOW_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $pairCount = 0
+          [void][int]::TryParse(($env:PAIR_COUNT ?? '0'), [ref]$pairCount)
+
+          $bodyLines = [System.Collections.Generic.List[string]]::new()
+          $bodyLines.Add('### VI history compare') | Out-Null
+          $bodyLines.Add('') | Out-Null
+          $bodyLines.Add(('- Pull request: #{0}' -f $env:PR_NUMBER)) | Out-Null
+
+          $markdown = $null
+          if ($env:MARKDOWN_ENCODED) {
+            $markdown = ($env:MARKDOWN_ENCODED -replace '%0A', "`n")
+          }
+
+          if ($pairCount -le 0) {
+            $bodyLines.Add('No changed `.vi` entries were detected for this pull request.') | Out-Null
+          } elseif ($markdown) {
+            $bodyLines.Add(('- Changed VI pairs: **{0}**' -f $pairCount)) | Out-Null
+            $bodyLines.Add('') | Out-Null
+            $bodyLines.Add($markdown) | Out-Null
+          } else {
+            $bodyLines.Add(('- Changed VI pairs: **{0}** (summary unavailable)' -f $pairCount)) | Out-Null
+            if ($env:SUMMARY_PATH) {
+              $bodyLines.Add(('- Summary JSON: `{0}`' -f $env:SUMMARY_PATH)) | Out-Null
+            }
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:NOTE)) {
+            $bodyLines.Add('') | Out-Null
+            $bodyLines.Add(('> NOTE - {0}' -f $env:NOTE)) | Out-Null
+          }
+
+          if (-not [string]::IsNullOrWhiteSpace($env:PR_URL)) {
+            $bodyLines.Add('') | Out-Null
+            $bodyLines.Add(('PR URL: {0}' -f $env:PR_URL)) | Out-Null
+          }
+          $bodyLines.Add(('Run details: [link]({0}).' -f $env:WORKFLOW_URL)) | Out-Null
+
+          if ($env:JOB_STATUS -ne 'success') {
+            $bodyLines.Add('') | Out-Null
+            $bodyLines.Add(('> WARNING - Workflow completed with status **{0}**.' -f $env:JOB_STATUS)) | Out-Null
+          }
+
+          $body = $bodyLines -join [Environment]::NewLine
+          gh pr comment $env:PR_NUMBER --repo $env:GITHUB_REPOSITORY --body $body

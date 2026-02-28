@@ -1,13 +1,17 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-  Runs a LabVIEW CLI compare inside a local NI Windows container image.
+  Runs a LabVIEW CLI compare inside a local NI Linux container image.
 
 .DESCRIPTION
   Preflights Docker mode/image availability and then executes
-  CreateComparisonReport inside `nationalinstruments/labview:latest-windows`
+  CreateComparisonReport inside `nationalinstruments/labview:latest-linux`
   (or a caller-supplied image). The helper writes deterministic capture
   artifacts adjacent to the report output.
+
+  Command shape follows NI LabVIEW CLI documentation:
+  - https://www.ni.com/docs/en-US/bundle/labview/page/command-line-operations.html
+  - https://www.ni.com/docs/en-US/bundle/labview/page/command-line-operation-to-compare-two-vis-and-generate-a-report.html
 
 .PARAMETER BaseVi
   Path to the base VI. Required unless -Probe is set.
@@ -17,11 +21,11 @@
 
 .PARAMETER Image
   Docker image tag to execute. Defaults to
-  nationalinstruments/labview:latest-windows.
+  nationalinstruments/labview:latest-linux.
 
 .PARAMETER ReportPath
   Optional report path on host. Defaults to
-  tests/results/ni-windows-container/compare-report.<ext>.
+  tests/results/ni-linux-container/compare-report.<ext>.
 
 .PARAMETER ReportType
   Host-facing report type selector: html, xml, or text.
@@ -33,10 +37,14 @@
   Additional CLI flags appended to CreateComparisonReport.
 
 .PARAMETER LabVIEWPath
-  Optional explicit in-container LabVIEW.exe path forwarded as -LabVIEWPath.
+  Optional explicit in-container LabVIEW path forwarded as -LabVIEWPath.
+
+.PARAMETER CliPath
+  Optional explicit in-container LabVIEW CLI path (for example
+  /usr/local/natinst/LabVIEW-2026Q1-64/labviewcli).
 
 .PARAMETER Probe
-  Preflight only (Docker availability, Windows container mode, and image
+  Preflight only (Docker availability, Linux container mode, and image
   presence). Does not require BaseVi/HeadVi.
 
 .PARAMETER PassThru
@@ -46,13 +54,14 @@
 param(
   [string]$BaseVi,
   [string]$HeadVi,
-  [string]$Image = 'nationalinstruments/labview:latest-windows',
+  [string]$Image = 'nationalinstruments/labview:latest-linux',
   [string]$ReportPath,
   [ValidateSet('html','xml','text')]
   [string]$ReportType = 'html',
   [int]$TimeoutSeconds = 600,
   [string[]]$Flags,
   [string]$LabVIEWPath,
+  [string]$CliPath,
   [switch]$Probe,
   [switch]$PassThru
 )
@@ -70,59 +79,22 @@ function Assert-Tool {
   }
 }
 
-function Resolve-EnvTokenValue {
-  param(
-    [Parameter(Mandatory)][string]$Name
-  )
-
-  foreach ($scope in @('Process', 'User', 'Machine')) {
-    $value = [Environment]::GetEnvironmentVariable($Name, $scope)
-    if (-not [string]::IsNullOrWhiteSpace($value)) {
-      return $value
-    }
-  }
-  return $null
-}
-
-function Resolve-EffectivePathInput {
-  param(
-    [Parameter(Mandatory)][string]$InputPath,
-    [Parameter(Mandatory)][string]$ParameterName
-  )
-
-  $trimmed = $InputPath.Trim()
-  if ($trimmed -match '^\$env:([A-Za-z_][A-Za-z0-9_]*)$') {
-    $envName = $Matches[1]
-    $resolved = Resolve-EnvTokenValue -Name $envName
-    if ([string]::IsNullOrWhiteSpace($resolved)) {
-      throw ("Parameter -{0} references env var '{1}', but it is not set in Process/User/Machine scope." -f $ParameterName, $envName)
-    }
-    return $resolved
-  }
-
-  return $InputPath
-}
-
 function Resolve-ExistingFilePath {
   param(
     [Parameter(Mandatory)][string]$InputPath,
     [Parameter(Mandatory)][string]$ParameterName
   )
-  $effectiveInput = $InputPath
-  if (-not [string]::IsNullOrWhiteSpace($effectiveInput)) {
-    $effectiveInput = Resolve-EffectivePathInput -InputPath $effectiveInput -ParameterName $ParameterName
-  }
-  if ([string]::IsNullOrWhiteSpace($effectiveInput)) {
+  if ([string]::IsNullOrWhiteSpace($InputPath)) {
     throw ("Parameter -{0} is required." -f $ParameterName)
   }
   try {
-    $resolved = Resolve-Path -LiteralPath $effectiveInput -ErrorAction Stop
+    $resolved = Resolve-Path -LiteralPath $InputPath -ErrorAction Stop
     if (-not (Test-Path -LiteralPath $resolved.Path -PathType Leaf)) {
-      throw ("Path is not a file: {0}" -f $effectiveInput)
+      throw ("Path is not a file: {0}" -f $InputPath)
     }
     return $resolved.Path
   } catch {
-    throw ("Unable to resolve -{0} file path '{1}'." -f $ParameterName, $effectiveInput)
+    throw ("Unable to resolve -{0} file path '{1}'." -f $ParameterName, $InputPath)
   }
 }
 
@@ -162,7 +134,7 @@ function Resolve-OutputReportPath {
     [Parameter(Mandatory)][string]$Extension
   )
   if ([string]::IsNullOrWhiteSpace($PathValue)) {
-    $defaultRoot = Join-Path (Resolve-Path '.').Path 'tests/results/ni-windows-container'
+    $defaultRoot = Join-Path (Resolve-Path '.').Path 'tests/results/ni-linux-container'
     return (Join-Path $defaultRoot ("compare-report.{0}" -f $Extension))
   }
   if ([System.IO.Path]::IsPathRooted($PathValue)) {
@@ -192,7 +164,7 @@ function Get-OrAddMountPath {
     [Parameter(Mandatory)][string]$HostDirectory
   )
   if (-not $Map.ContainsKey($HostDirectory)) {
-    $Map[$HostDirectory] = ('C:\compare\m{0}' -f $Index.Value)
+    $Map[$HostDirectory] = ('/compare/m{0}' -f $Index.Value)
     $Index.Value++
   }
   return $Map[$HostDirectory]
@@ -206,52 +178,75 @@ function Convert-HostFileToContainerPath {
   )
   $hostDir = Split-Path -Parent $HostFilePath
   $containerDir = Get-OrAddMountPath -Map $MountMap -Index $MountIndex -HostDirectory $hostDir
-  return (Join-Path $containerDir (Split-Path -Leaf $HostFilePath))
+  return (Join-Path $containerDir (Split-Path -Leaf $HostFilePath)).Replace('\', '/')
 }
 
-function New-ContainerCommand {
+function New-ContainerScript {
   return @'
-$ErrorActionPreference = "Stop"
-$cliCandidates = @(
-  "C:\Program Files\National Instruments\Shared\LabVIEW CLI\LabVIEWCLI.exe",
-  "C:\Program Files (x86)\National Instruments\Shared\LabVIEW CLI\LabVIEWCLI.exe"
+#!/usr/bin/env bash
+set -euo pipefail
+
+resolve_cli_path() {
+  if [[ -n "${COMPARE_CLI_PATH:-}" ]] && [[ -x "${COMPARE_CLI_PATH}" ]]; then
+    printf '%s' "${COMPARE_CLI_PATH}"
+    return 0
+  fi
+
+  local candidates=(
+    "/usr/local/natinst/LabVIEW-2026Q1-64/labviewcli"
+    "/usr/local/natinst/LabVIEW-2026Q1-64/LabVIEWCLI"
+    "/usr/local/natinst/LabVIEW-2025-64/labviewcli"
+    "/usr/local/natinst/LabVIEW-2025-64/LabVIEWCLI"
+  )
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+
+  local discovered
+  discovered="$(find /usr/local/natinst -maxdepth 4 -type f \( -iname 'labviewcli' -o -iname 'LabVIEWCLI' \) 2>/dev/null | head -n 1 || true)"
+  if [[ -n "${discovered}" ]]; then
+    printf '%s' "${discovered}"
+    return 0
+  fi
+
+  return 1
+}
+
+cli_path="$(resolve_cli_path || true)"
+if [[ -z "${cli_path}" ]]; then
+  echo "LabVIEW CLI executable not found in container." >&2
+  exit 2
+fi
+
+declare -a args=(
+  "-OperationName" "CreateComparisonReport"
+  "-VI1" "${COMPARE_BASE_VI}"
+  "-VI2" "${COMPARE_HEAD_VI}"
+  "-ReportPath" "${COMPARE_REPORT_PATH}"
+  "-ReportType" "${COMPARE_REPORT_TYPE}"
 )
-$cliPath = $cliCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if (-not $cliPath) {
-  throw "LabVIEWCLI.exe not found in container. Ensure the NI image includes the LabVIEW CLI component."
-}
-$args = @(
-  "-OperationName", "CreateComparisonReport",
-  "-VI1", $env:COMPARE_BASE_VI,
-  "-VI2", $env:COMPARE_HEAD_VI,
-  "-ReportPath", $env:COMPARE_REPORT_PATH,
-  "-ReportType", $env:COMPARE_REPORT_TYPE
-)
-if (-not [string]::IsNullOrWhiteSpace($env:COMPARE_LABVIEW_PATH)) {
-  $args += @("-LabVIEWPath", $env:COMPARE_LABVIEW_PATH)
-}
-$flags = @()
-if (-not [string]::IsNullOrWhiteSpace($env:COMPARE_FLAGS_B64)) {
-  $rawBytes = [System.Convert]::FromBase64String($env:COMPARE_FLAGS_B64)
-  $rawJson = [System.Text.Encoding]::UTF8.GetString($rawBytes)
-  if (-not [string]::IsNullOrWhiteSpace($rawJson)) {
-    $parsed = $rawJson | ConvertFrom-Json -ErrorAction Stop
-    if ($parsed -is [System.Collections.IEnumerable] -and -not ($parsed -is [string])) {
-      foreach ($flag in $parsed) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$flag)) {
-          $flags += [string]$flag
-        }
-      }
-    } elseif (-not [string]::IsNullOrWhiteSpace([string]$parsed)) {
-      $flags += [string]$parsed
-    }
-  }
-}
-if ($flags.Count -gt 0) {
-  $args += $flags
-}
-& $cliPath @args
-exit $LASTEXITCODE
+
+if [[ -n "${COMPARE_LABVIEW_PATH_ARG:-}" ]]; then
+  args+=("-LabVIEWPath" "${COMPARE_LABVIEW_PATH_ARG}")
+fi
+
+if [[ -n "${COMPARE_FLAGS_B64:-}" ]]; then
+  decoded_flags="$(printf '%s' "${COMPARE_FLAGS_B64}" | base64 --decode 2>/dev/null || true)"
+  if [[ -n "${decoded_flags}" ]]; then
+    while IFS= read -r flag; do
+      if [[ -n "${flag}" ]]; then
+        args+=("${flag}")
+      fi
+    done <<< "${decoded_flags}"
+  fi
+fi
+
+"${cli_path}" "${args[@]}"
+exit $?
 '@
 }
 
@@ -269,9 +264,9 @@ function Invoke-DockerRunWithTimeout {
     [Parameter(Mandatory)][string]$ContainerName
   )
 
-  $stdoutFile = Join-Path $env:TEMP ("ni-windows-container-stdout-{0}.log" -f ([guid]::NewGuid().ToString('N')))
-  $stderrFile = Join-Path $env:TEMP ("ni-windows-container-stderr-{0}.log" -f ([guid]::NewGuid().ToString('N')))
-  $dockerArgsFile = Join-Path $env:TEMP ("ni-windows-container-docker-args-{0}.json" -f ([guid]::NewGuid().ToString('N')))
+  $stdoutFile = Join-Path $env:TEMP ("ni-linux-container-stdout-{0}.log" -f ([guid]::NewGuid().ToString('N')))
+  $stderrFile = Join-Path $env:TEMP ("ni-linux-container-stderr-{0}.log" -f ([guid]::NewGuid().ToString('N')))
+  $dockerArgsFile = Join-Path $env:TEMP ("ni-linux-container-docker-args-{0}.json" -f ([guid]::NewGuid().ToString('N')))
   $process = $null
   try {
     $pwshPath = (Get-Command -Name 'pwsh' -ErrorAction SilentlyContinue | Select-Object -First 1).Source
@@ -363,7 +358,8 @@ function Test-LabVIEWCliFailure {
   }
   return (
     $combined -match 'Error code\s*:' -or
-    $combined -match 'An error occurred while running the LabVIEW CLI'
+    $combined -match 'An error occurred while running the LabVIEW CLI' -or
+    $combined -match 'LabVIEW CLI executable not found'
   )
 }
 
@@ -398,23 +394,23 @@ if ($TimeoutSeconds -le 0) {
 }
 
 $capture = [ordered]@{
-  schema        = 'ni-windows-container-compare/v1'
-  generatedAt   = (Get-Date).ToUniversalTime().ToString('o')
-  image         = $Image
-  reportType    = $ReportType
-  timeoutSeconds= $TimeoutSeconds
-  probe         = [bool]$Probe
-  status        = 'init'
-  exitCode      = $null
-  timedOut      = $false
-  dockerServerOs= $null
-  baseVi        = $null
-  headVi        = $null
-  reportPath    = $null
-  command       = $null
-  stdoutPath    = $null
-  stderrPath    = $null
-  message       = $null
+  schema         = 'ni-linux-container-compare/v1'
+  generatedAt    = (Get-Date).ToUniversalTime().ToString('o')
+  image          = $Image
+  reportType     = $ReportType
+  timeoutSeconds = $TimeoutSeconds
+  probe          = [bool]$Probe
+  status         = 'init'
+  exitCode       = $null
+  timedOut       = $false
+  dockerServerOs = $null
+  baseVi         = $null
+  headVi         = $null
+  reportPath     = $null
+  command        = $null
+  stdoutPath     = $null
+  stderrPath     = $null
+  message        = $null
 }
 
 $finalExitCode = 0
@@ -423,14 +419,15 @@ $stderrContent = ''
 $capturePath = $null
 $stdoutPath = $null
 $stderrPath = $null
+$scriptTempDir = $null
 
 try {
   Assert-Tool -Name 'docker'
 
   $dockerOsType = Get-DockerServerOsType
   $capture.dockerServerOs = $dockerOsType
-  if ($dockerOsType -ne 'windows') {
-    throw ("Docker daemon is running in '{0}' mode. Switch Docker Desktop to Windows containers and retry." -f $dockerOsType)
+  if ($dockerOsType -ne 'linux') {
+    throw ("Docker daemon is running in '{0}' mode. Switch Docker Desktop to Linux containers and retry." -f $dockerOsType)
   }
   if (-not (Test-DockerImageExists -Tag $Image)) {
     throw ("Docker image '{0}' not found locally. Pull it first: docker pull {0}" -f $Image)
@@ -439,8 +436,8 @@ try {
   if ($Probe) {
     $capture.status = 'probe-ok'
     $capture.exitCode = 0
-    $capture.message = ("Docker is in windows mode and image '{0}' is available." -f $Image)
-    Write-Host ("[ni-container-probe] {0}" -f $capture.message) -ForegroundColor Green
+    $capture.message = ("Docker is in linux mode and image '{0}' is available." -f $Image)
+    Write-Host ("[ni-linux-container-probe] {0}" -f $capture.message) -ForegroundColor Green
   } else {
     $baseViPath = Resolve-ExistingFilePath -InputPath $BaseVi -ParameterName 'BaseVi'
     $headViPath = Resolve-ExistingFilePath -InputPath $HeadVi -ParameterName 'HeadVi'
@@ -451,9 +448,9 @@ try {
       New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
     }
 
-    $capturePath = Join-Path $reportDirectory 'ni-windows-container-capture.json'
-    $stdoutPath = Join-Path $reportDirectory 'ni-windows-container-stdout.txt'
-    $stderrPath = Join-Path $reportDirectory 'ni-windows-container-stderr.txt'
+    $capturePath = Join-Path $reportDirectory 'ni-linux-container-capture.json'
+    $stdoutPath = Join-Path $reportDirectory 'ni-linux-container-stdout.txt'
+    $stderrPath = Join-Path $reportDirectory 'ni-linux-container-stderr.txt'
 
     $capture.baseVi = $baseViPath
     $capture.headVi = $headViPath
@@ -461,12 +458,8 @@ try {
     $capture.stdoutPath = $stdoutPath
     $capture.stderrPath = $stderrPath
 
-    $flagsPayload = if ($Flags) { @($Flags) } else { @() }
-    $flagsJson = $flagsPayload | ConvertTo-Json -Compress
-    if ([string]::IsNullOrWhiteSpace($flagsJson)) {
-      $flagsJson = '[]'
-    }
-    $flagsB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($flagsJson))
+    $flagsPayload = if ($Flags) { ($Flags -join "`n") } else { '' }
+    $flagsB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($flagsPayload))
 
     $mounts = @{}
     $mountIndex = 0
@@ -475,39 +468,44 @@ try {
     $containerHeadVi = Convert-HostFileToContainerPath -HostFilePath $headViPath -MountMap $mounts -MountIndex $mountRef
     $containerReportPath = Convert-HostFileToContainerPath -HostFilePath $resolvedReportPath -MountMap $mounts -MountIndex $mountRef
 
-    $containerName = 'ni-compare-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 12))
-    $containerCommand = New-ContainerCommand
-    $encodedContainerCommand = Convert-ToEncodedCommand -CommandText $containerCommand
+    $scriptTempDir = Join-Path $env:TEMP ("ni-linux-container-script-{0}" -f ([guid]::NewGuid().ToString('N')))
+    New-Item -ItemType Directory -Path $scriptTempDir -Force | Out-Null
+    $hostContainerScriptPath = Join-Path $scriptTempDir 'run-compare.sh'
+    New-ContainerScript | Set-Content -LiteralPath $hostContainerScriptPath -Encoding utf8
+    $mounts[$scriptTempDir] = '/compare/script'
 
+    $containerName = 'ni-linux-compare-{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 12))
     $dockerArgs = @(
       'run',
       '--rm',
       '--name', $containerName,
-      '--workdir', 'C:\compare'
+      '--workdir', '/compare'
     )
+
     foreach ($entry in ($mounts.GetEnumerator() | Sort-Object Name)) {
       $volumeSpec = '{0}:{1}' -f $entry.Name, $entry.Value
       $dockerArgs += @('-v', $volumeSpec)
     }
+
     $dockerArgs += @('--env', ("COMPARE_BASE_VI={0}" -f $containerBaseVi))
     $dockerArgs += @('--env', ("COMPARE_HEAD_VI={0}" -f $containerHeadVi))
     $dockerArgs += @('--env', ("COMPARE_REPORT_PATH={0}" -f $containerReportPath))
     $dockerArgs += @('--env', ("COMPARE_REPORT_TYPE={0}" -f $reportInfo.CliReportType))
     $dockerArgs += @('--env', ("COMPARE_FLAGS_B64={0}" -f $flagsB64))
     if (-not [string]::IsNullOrWhiteSpace($LabVIEWPath)) {
-      $dockerArgs += @('--env', ("COMPARE_LABVIEW_PATH={0}" -f $LabVIEWPath))
+      $dockerArgs += @('--env', ("COMPARE_LABVIEW_PATH_ARG={0}" -f $LabVIEWPath))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($CliPath)) {
+      $dockerArgs += @('--env', ("COMPARE_CLI_PATH={0}" -f $CliPath))
     }
     $dockerArgs += @(
       $Image,
-      'powershell',
-      '-NoLogo',
-      '-NoProfile',
-      '-EncodedCommand',
-      $encodedContainerCommand
+      '/bin/bash',
+      '/compare/script/run-compare.sh'
     )
 
-    $capture.command = ('docker run --rm --name {0} ... {1} powershell -NoLogo -NoProfile -EncodedCommand <base64-compare-script>' -f $containerName, $Image)
-    Write-Host ("[ni-container-compare] image={0} report={1}" -f $Image, $resolvedReportPath) -ForegroundColor Cyan
+    $capture.command = ('docker run --rm --name {0} ... {1} /bin/bash /compare/script/run-compare.sh' -f $containerName, $Image)
+    Write-Host ("[ni-linux-container-compare] image={0} report={1}" -f $Image, $resolvedReportPath) -ForegroundColor Cyan
 
     $runResult = Invoke-DockerRunWithTimeout -DockerArgs $dockerArgs -Seconds $TimeoutSeconds -ContainerName $containerName
     $stdoutContent = $runResult.StdOut
@@ -539,6 +537,13 @@ try {
       }
       $finalExitCode = $exitCode
     }
+
+    if ($capture.status -eq 'ok' -and -not (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf)) {
+      $capture.status = 'error'
+      $capture.message = ("Expected report was not created: {0}" -f $resolvedReportPath)
+      $finalExitCode = 3
+      $capture.exitCode = $finalExitCode
+    }
   }
 } catch {
   $capture.status = 'preflight-error'
@@ -552,8 +557,11 @@ try {
     if ($capturePath) {
       $capture.generatedAt = (Get-Date).ToUniversalTime().ToString('o')
       $capture | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $capturePath -Encoding utf8
-      Write-Host ("[ni-container-compare] capture={0} status={1} exit={2}" -f $capturePath, $capture.status, $capture.exitCode) -ForegroundColor DarkGray
+      Write-Host ("[ni-linux-container-compare] capture={0} status={1} exit={2}" -f $capturePath, $capture.status, $capture.exitCode) -ForegroundColor DarkGray
     }
+  }
+  if ($scriptTempDir) {
+    Remove-Item -LiteralPath $scriptTempDir -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -562,7 +570,7 @@ if ($PassThru) {
 }
 
 if ($finalExitCode -ne 0 -and -not [string]::IsNullOrWhiteSpace($capture.message)) {
-  Write-Host ("[ni-container-compare] {0}" -f $capture.message) -ForegroundColor Red
+  Write-Host ("[ni-linux-container-compare] {0}" -f $capture.message) -ForegroundColor Red
 }
 
 exit $finalExitCode

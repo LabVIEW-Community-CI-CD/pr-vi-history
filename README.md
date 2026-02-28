@@ -34,9 +34,9 @@ jobs:
       compare_modes: 'default,attributes'
       include_merge_parents: false
       windows_runner: windows-2025
-      windows_image: nationalinstruments/labview:2026q1-windows
+      windows_image: nationalinstruments/labview:latest-windows
       linux_runner: ubuntu-latest
-      linux_image: nationalinstruments/labview:2026q1-linux
+      linux_image: nationalinstruments/labview:latest-linux
       enable_linux_smoke: true
       upload_artifact: true
       post_comment: true
@@ -45,8 +45,8 @@ jobs:
 
 ## Reusable workflow inputs
 
-- `windows_image` (string, default `nationalinstruments/labview:2026q1-windows`)
-- `linux_image` (string, default `nationalinstruments/labview:2026q1-linux`)
+- `windows_image` (string, default `nationalinstruments/labview:latest-windows`)
+- `linux_image` (string, default `nationalinstruments/labview:latest-linux`)
 - `windows_runner` (string, default `windows-2025`)
 - `linux_runner` (string, default `ubuntu-latest`)
 - `enable_linux_smoke` (boolean, default `true`)

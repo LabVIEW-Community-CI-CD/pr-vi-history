@@ -55,12 +55,12 @@ on:
       windows_image:
         description: 'NI windows container image used for compare lane'
         required: false
-        default: 'nationalinstruments/labview:2026q1-windows'
+        default: 'nationalinstruments/labview:latest-windows'
         type: string
       linux_image:
         description: 'NI linux container image used for smoke lane'
         required: false
-        default: 'nationalinstruments/labview:2026q1-linux'
+        default: 'nationalinstruments/labview:latest-linux'
         type: string
       windows_runner:
         description: 'Hosted runner label for windows compare lane'
@@ -131,12 +131,12 @@ on:
       windows_image:
         description: 'NI windows container image used for compare lane'
         required: false
-        default: 'nationalinstruments/labview:2026q1-windows'
+        default: 'nationalinstruments/labview:latest-windows'
         type: string
       linux_image:
         description: 'NI linux container image used for smoke lane'
         required: false
-        default: 'nationalinstruments/labview:2026q1-linux'
+        default: 'nationalinstruments/labview:latest-linux'
         type: string
       windows_runner:
         description: 'Hosted runner label for windows compare lane'
@@ -341,7 +341,7 @@ jobs:
           if-no-files-found: error
 
   history_windows_container:
-    name: History compare (2026q1-windows)
+    name: History compare (latest-windows)
     needs: prepare
     runs-on: ${{ inputs.windows_runner }}
     timeout-minutes: 30
@@ -565,7 +565,7 @@ jobs:
           "status=$status" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
   history_linux_smoke:
-    name: History smoke (2026q1-linux)
+    name: History smoke (latest-linux)
     needs: prepare
     if: ${{ inputs.enable_linux_smoke == true || inputs.enable_linux_smoke == 'true' }}
     continue-on-error: true

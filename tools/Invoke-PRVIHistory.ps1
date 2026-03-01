@@ -406,6 +406,15 @@ try {
     throw ("Unable to locate Compare-VIHistory.ps1 at expected path: {0}" -f $compareScriptPathCandidate)
 }
 Write-Verbose ("Compare-VIHistory resolved to: {0}" -f $compareScriptPathResolved)
+$existingScriptsRoot = [System.Environment]::GetEnvironmentVariable('COMPAREVI_SCRIPTS_ROOT', 'Process')
+if ([string]::IsNullOrWhiteSpace($existingScriptsRoot)) {
+    $compareToolsRoot = Split-Path -Parent $compareScriptPathResolved
+    $compareRepoRoot = Split-Path -Parent $compareToolsRoot
+    if (-not [string]::IsNullOrWhiteSpace($compareRepoRoot) -and (Test-Path -LiteralPath $compareRepoRoot -PathType Container)) {
+        [System.Environment]::SetEnvironmentVariable('COMPAREVI_SCRIPTS_ROOT', $compareRepoRoot, 'Process')
+        Write-Verbose ("COMPAREVI_SCRIPTS_ROOT defaulted to: {0}" -f $compareRepoRoot)
+    }
+}
 
 if (-not $CompareInvoker) {
     $compareScriptLiteral = $compareScriptPathResolved.Replace("'", "''")

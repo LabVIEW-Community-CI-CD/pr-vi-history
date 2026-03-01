@@ -179,16 +179,18 @@ if (-not $tool) {
 $sourceFiles = @()
 if (Test-Path -LiteralPath $resolvedArtifactRoot -PathType Container) {
   $extensions = @('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp')
-  $sourceFiles = Get-ChildItem -LiteralPath $resolvedArtifactRoot -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object {
-      $ext = $_.Extension.ToLowerInvariant()
-      if ($extensions -notcontains $ext) { return $false }
-      $normalized = $_.FullName.Replace('\','/').ToLowerInvariant()
-      if ($normalized.Contains('/mobile-preview/')) { return $false }
-      return $true
-    } |
-    Sort-Object @{ Expression = { Get-SourcePriority -FullName $_.FullName } }, @{ Expression = { $_.Length }; Descending = $true }, @{ Expression = { $_.FullName } } |
-    Select-Object -First $MaxSources
+  $sourceFiles = @(
+    Get-ChildItem -LiteralPath $resolvedArtifactRoot -Recurse -File -ErrorAction SilentlyContinue |
+      Where-Object {
+        $ext = $_.Extension.ToLowerInvariant()
+        if ($extensions -notcontains $ext) { return $false }
+        $normalized = $_.FullName.Replace('\','/').ToLowerInvariant()
+        if ($normalized.Contains('/mobile-preview/')) { return $false }
+        return $true
+      } |
+      Sort-Object @{ Expression = { Get-SourcePriority -FullName $_.FullName } }, @{ Expression = { $_.Length }; Descending = $true }, @{ Expression = { $_.FullName } } |
+      Select-Object -First $MaxSources
+  )
 } else {
   $status = 'missing-artifact-root'
   $warnings.Add(("Artifact root not found: {0}" -f $resolvedArtifactRoot)) | Out-Null
@@ -196,7 +198,7 @@ if (Test-Path -LiteralPath $resolvedArtifactRoot -PathType Container) {
 
 $items = [System.Collections.Generic.List[object]]::new()
 $processedCount = 0
-if ($tool -and $sourceFiles.Count -gt 0) {
+if ($tool -and @($sourceFiles).Count -gt 0) {
   foreach ($source in $sourceFiles) {
     $sourceToken = Sanitize-Token -Value ([System.IO.Path]::GetFileNameWithoutExtension($source.Name))
     $itemIndex = $processedCount + 1
@@ -258,7 +260,7 @@ if ($tool -and $sourceFiles.Count -gt 0) {
   }
 }
 
-if ($sourceFiles.Count -eq 0 -and $status -eq 'ok') {
+if (@($sourceFiles).Count -eq 0 -and $status -eq 'ok') {
   $status = 'no-sources'
   $warnings.Add('No image sources found under artifact root.') | Out-Null
 }
@@ -270,7 +272,7 @@ $manifest = [ordered]@{
   artifactRoot = $resolvedArtifactRoot
   outputDir = $resolvedOutputDir
   widths = @($Widths)
-  sourceCount = $sourceFiles.Count
+  sourceCount = @($sourceFiles).Count
   itemCount = $items.Count
   warnings = @($warnings)
   items = @($items)

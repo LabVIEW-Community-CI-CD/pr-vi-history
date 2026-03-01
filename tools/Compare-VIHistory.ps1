@@ -1081,6 +1081,12 @@ if (-not [string]::IsNullOrWhiteSpace($scriptsOverride)) {
 }
 
 if (-not $compareScript) {
+  $localCompareScript = Join-Path (Split-Path -Parent $PSCommandPath) 'Compare-RefsToTemp.ps1'
+  if (Test-Path -LiteralPath $localCompareScript -PathType Leaf) {
+    $compareScript = $localCompareScript
+  }
+}
+if (-not $compareScript) {
   $compareScript = Join-Path $repoRoot 'tools' 'Compare-RefsToTemp.ps1'
 }
 if (-not (Test-Path -LiteralPath $compareScript -PathType Leaf)) {

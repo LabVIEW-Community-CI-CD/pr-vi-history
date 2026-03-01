@@ -333,7 +333,7 @@ jobs:
           include_merge_parents: ${{ inputs.include_merge_parents }}
           windows_image: ${{ needs.prepare.outputs.windows_image }}
           cross_compile: ${{ inputs.cross_compile }}
-          toolchain_lock_path: ${{ needs.prepare.outputs.toolchain_lock_path }}
+          toolchain_lock_path: .pr-vi-history-tools/toolchain-lock.json
 
       - name: Upload history artifacts
         if: ${{ always() && (inputs.upload_artifact == '' || inputs.upload_artifact == true || inputs.upload_artifact == 'true') }}
@@ -395,7 +395,7 @@ jobs:
         with:
           linux_image: ${{ needs.prepare.outputs.linux_image }}
           results_root: ${{ inputs.results_root || 'tests/results/pr-vi-history' }}
-          toolchain_lock_path: ${{ needs.prepare.outputs.toolchain_lock_path }}
+          toolchain_lock_path: .pr-vi-history-tools/toolchain-lock.json
           cross_compile: ${{ inputs.cross_compile }}
           emit_html: true
 

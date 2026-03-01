@@ -382,8 +382,7 @@ if ($DryRun.IsPresent) {
 }
 
 if ($targets.Count -eq 0 -and $skippedPairs.Count -eq 0) {
-    Write-Host 'No VI targets to process; exiting.'
-    return
+    Write-Host 'No VI targets to process; writing empty summary.'
 }
 
 $resultsRootResolved = if ([System.IO.Path]::IsPathRooted($ResultsRoot)) {

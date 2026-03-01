@@ -186,6 +186,12 @@ on:
       toolchain_contract_path:
         description: Absolute path to runtime toolchain contract JSON
         value: ${{ jobs.finalize.outputs.toolchain_contract_path }}
+      mobile_preview_manifest_path:
+        description: Absolute path to mobile preview manifest JSON when available
+        value: ${{ jobs.finalize.outputs.mobile_preview_manifest_path }}
+      mobile_preview_artifact_name:
+        description: Artifact name containing mobile preview images and manifest
+        value: ${{ jobs.finalize.outputs.mobile_preview_artifact_name }}
       pair_total_count:
         description: Total changed VI count before max_targets truncation
         value: ${{ jobs.finalize.outputs.pair_total_count }}
@@ -443,6 +449,8 @@ jobs:
       windows_capture_path: ${{ steps.finalize.outputs.windows_capture_path }}
       linux_smoke_summary_path: ${{ steps.finalize.outputs.linux_smoke_summary_path }}
       toolchain_contract_path: ${{ steps.finalize.outputs.toolchain_contract_path }}
+      mobile_preview_manifest_path: ${{ steps.mobile_preview.outputs.mobile_preview_manifest_path }}
+      mobile_preview_artifact_name: ${{ steps.mobile_preview_meta.outputs.mobile_preview_artifact_name }}
     steps:
       - name: Checkout workflow toolchain
         uses: actions/checkout@v5
@@ -451,6 +459,56 @@ jobs:
           ref: ${{ inputs.tools_ref || 'main' }}
           path: .pr-vi-history-tools
           fetch-depth: 1
+
+      - name: Download history artifact for mobile previews
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.prepare.outputs.artifact_name }}
+          path: ${{ runner.temp }}/pr-vi-history-artifact
+
+      - name: Set mobile preview artifact name
+        id: mobile_preview_meta
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $name = "pr-vi-history-mobile-preview-${{ needs.prepare.outputs.pr_number }}"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("mobile_preview_artifact_name={0}" -f $name) -Encoding utf8
+
+      - name: Build mobile previews and manifest
+        id: mobile_preview
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $artifactRoot = Join-Path $env:RUNNER_TEMP 'pr-vi-history-artifact'
+          if (-not (Test-Path -LiteralPath $artifactRoot -PathType Container)) {
+            New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+          }
+          $outputDir = Join-Path $artifactRoot 'mobile-preview'
+          $manifestPath = Join-Path $outputDir 'mobile-preview.json'
+          $scriptPath = Join-Path '${{ github.workspace }}' '.pr-vi-history-tools' 'tools' 'Build-PRVIHistoryMobilePreviews.ps1'
+          if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+            throw ("Mobile preview builder script not found: {0}" -f $scriptPath)
+          }
+          pwsh -NoLogo -NoProfile -File $scriptPath `
+            -ArtifactRoot $artifactRoot `
+            -OutputDir $outputDir `
+            -ManifestPath $manifestPath `
+            -GitHubOutputPath $env:GITHUB_OUTPUT
+
+      - name: Upload mobile preview artifact
+        if: ${{ always() && steps.mobile_preview.outputs.mobile_preview_manifest_path != '' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.mobile_preview_meta.outputs.mobile_preview_artifact_name }}
+          path: |
+            ${{ steps.mobile_preview.outputs.mobile_preview_output_dir }}/**
+            ${{ steps.mobile_preview.outputs.mobile_preview_manifest_path }}
+          if-no-files-found: warn
 
       - name: Normalize outputs and enforce gates
         id: finalize
@@ -488,6 +546,10 @@ jobs:
           PAIR_TOTAL_COUNT: ${{ steps.finalize.outputs.pair_total_count }}
           PAIR_TRUNCATED: ${{ steps.finalize.outputs.pair_truncated }}
           MARKDOWN_ENCODED: ${{ needs.history_windows_container.outputs.markdown }}
+          MOBILE_PREVIEW_MANIFEST_PATH: ${{ steps.mobile_preview.outputs.mobile_preview_manifest_path }}
+          MOBILE_PREVIEW_STATUS: ${{ steps.mobile_preview.outputs.mobile_preview_status }}
+          MOBILE_PREVIEW_COUNT: ${{ steps.mobile_preview.outputs.mobile_preview_count }}
+          MOBILE_PREVIEW_ARTIFACT_NAME: ${{ steps.mobile_preview_meta.outputs.mobile_preview_artifact_name }}
           NOTE: ${{ inputs.note }}
         run: |
           Set-StrictMode -Version Latest
@@ -519,6 +581,68 @@ jobs:
             }
             $bodyLines.Add('') | Out-Null
             $bodyLines.Add($markdown) | Out-Null
+          }
+
+          function Get-MimeTypeForPath {
+            param([string]$PathValue)
+            if ([string]::IsNullOrWhiteSpace($PathValue)) { return 'image/png' }
+            $ext = [System.IO.Path]::GetExtension($PathValue).ToLowerInvariant()
+            switch ($ext) {
+              '.webp' { return 'image/webp' }
+              '.png' { return 'image/png' }
+              '.jpg' { return 'image/jpeg' }
+              '.jpeg' { return 'image/jpeg' }
+              '.gif' { return 'image/gif' }
+              default { return 'image/png' }
+            }
+          }
+
+          $mobileManifest = $null
+          if (-not [string]::IsNullOrWhiteSpace($env:MOBILE_PREVIEW_MANIFEST_PATH) -and (Test-Path -LiteralPath $env:MOBILE_PREVIEW_MANIFEST_PATH -PathType Leaf)) {
+            try {
+              $mobileManifest = Get-Content -LiteralPath $env:MOBILE_PREVIEW_MANIFEST_PATH -Raw | ConvertFrom-Json -Depth 12
+            } catch {
+              $mobileManifest = $null
+            }
+          }
+
+          if ($mobileManifest -and $mobileManifest.itemCount -gt 0) {
+            $bodyLines.Add('') | Out-Null
+            $bodyLines.Add('#### Mobile previews') | Out-Null
+            $bodyLines.Add('Tap any preview to open this workflow run and download full artifacts.') | Out-Null
+
+            $maxInline = 2
+            $maxInlineBytes = 80000
+            $rendered = 0
+            $inlineBytes = 0
+            foreach ($item in @($mobileManifest.items)) {
+              if ($rendered -ge $maxInline) { break }
+              if (-not $item) { continue }
+              $inlinePath = if ($item.PSObject.Properties['inlinePreviewPath']) { [string]$item.inlinePreviewPath } else { $null }
+              if ([string]::IsNullOrWhiteSpace($inlinePath) -or -not (Test-Path -LiteralPath $inlinePath -PathType Leaf)) { continue }
+              $fileInfo = Get-Item -LiteralPath $inlinePath -ErrorAction SilentlyContinue
+              if (-not $fileInfo) { continue }
+              if (($inlineBytes + [int]$fileInfo.Length) -gt $maxInlineBytes) { break }
+
+              $bytes = [System.IO.File]::ReadAllBytes($inlinePath)
+              $b64 = [System.Convert]::ToBase64String($bytes)
+              $mime = Get-MimeTypeForPath -PathValue $inlinePath
+              $altRaw = if ($item.PSObject.Properties['sourceRelativePath'] -and $item.sourceRelativePath) { [string]$item.sourceRelativePath } else { "Preview $($rendered + 1)" }
+              $alt = $altRaw.Replace('"', '&quot;')
+              $line = '<a href="' + $env:WORKFLOW_URL + '"><img alt="' + $alt + '" src="data:' + $mime + ';base64,' + $b64 + '" width="170" /></a>'
+              $bodyLines.Add($line) | Out-Null
+              $rendered++
+              $inlineBytes += [int]$fileInfo.Length
+            }
+
+            $totalItems = [int]$mobileManifest.itemCount
+            if ($totalItems -gt $rendered) {
+              $remaining = $totalItems - $rendered
+              $bodyLines.Add(('- +' + $remaining + ' more mobile preview image(s) in artifact `' + $env:MOBILE_PREVIEW_ARTIFACT_NAME + '`.')) | Out-Null
+            }
+          } elseif ([string]::Equals(($env:MOBILE_PREVIEW_STATUS ?? ''), 'ok', [System.StringComparison]::OrdinalIgnoreCase) -and [string]::Equals(($env:MOBILE_PREVIEW_COUNT ?? '0'), '0', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $bodyLines.Add('') | Out-Null
+            $bodyLines.Add('No mobile preview image assets were detected in this run output.') | Out-Null
           }
 
           if (-not [string]::IsNullOrWhiteSpace($env:NOTE)) {

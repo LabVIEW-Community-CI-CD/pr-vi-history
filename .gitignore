@@ -5,6 +5,9 @@ Thumbs.db
 # Local temp
 *.tmp
 *.log
+tests/results/local-parity/
+tests/
+tmp-manifest.json
 
 # Node / package managers
 node_modules/

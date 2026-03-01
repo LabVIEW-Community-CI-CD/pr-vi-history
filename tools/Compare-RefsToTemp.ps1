@@ -32,18 +32,21 @@ function Resolve-CompareVIScriptsRoot {
   param([string]$PrimaryRoot)
 
   $candidateRoots = New-Object System.Collections.Generic.List[string]
-  if (-not [string]::IsNullOrWhiteSpace($PrimaryRoot)) {
-    $candidateRoots.Add($PrimaryRoot) | Out-Null
-  }
   $scriptsOverride = [System.Environment]::GetEnvironmentVariable('COMPAREVI_SCRIPTS_ROOT','Process')
   if (-not [string]::IsNullOrWhiteSpace($scriptsOverride)) {
     $candidateRoots.Add($scriptsOverride) | Out-Null
+  }
+  if (-not [string]::IsNullOrWhiteSpace($PrimaryRoot)) {
+    $candidateRoots.Add($PrimaryRoot) | Out-Null
   }
   foreach ($root in $candidateRoots) {
     $moduleCandidate = Join-Path (Join-Path $root 'scripts') 'CompareVI.psm1'
     if (Test-Path -LiteralPath $moduleCandidate -PathType Leaf) {
       return $root
     }
+  }
+  if ($candidateRoots.Count -gt 0) {
+    return $candidateRoots[0]
   }
   return $PrimaryRoot
 }
@@ -396,8 +399,31 @@ if ($detailRequested) {
     $cliDiff = if ($capture.PSObject.Properties['status'] -and $capture.status) { [string]::Equals([string]$capture.status, 'diff', [System.StringComparison]::OrdinalIgnoreCase) } else { $cliExit -eq 1 }
     $cliCommand = if ($capture.PSObject.Properties['command'] -and $capture.command) { [string]$capture.command } else { 'Run-NIWindowsContainerCompare.ps1' }
     $cliPath = 'LabVIEWCLI(container)'
+    $containerArtifacts = [ordered]@{}
     if ($capture.PSObject.Properties['image'] -and $capture.image) {
-      $cliArtifacts = [pscustomobject]@{ containerImage = [string]$capture.image }
+      $containerArtifacts.containerImage = [string]$capture.image
+    }
+    if ($capture.PSObject.Properties['reportPath'] -and $capture.reportPath -and (Test-Path -LiteralPath ([string]$capture.reportPath) -PathType Leaf)) {
+      $reportPath = [string]$capture.reportPath
+    }
+    if ($capture.PSObject.Properties['reportAssets'] -and $capture.reportAssets) {
+      $resolvedAssets = @()
+      foreach ($assetPath in @($capture.reportAssets)) {
+        if (-not $assetPath) { continue }
+        $assetText = [string]$assetPath
+        if (Test-Path -LiteralPath $assetText -PathType Leaf) {
+          $resolvedAssets += (Resolve-Path -LiteralPath $assetText).Path
+        }
+      }
+      if ($resolvedAssets.Count -gt 0) {
+        $containerArtifacts.reportAssets = @($resolvedAssets | Sort-Object -Unique)
+        if (-not $imagesDir) {
+          $imagesDir = (Split-Path -Parent $resolvedAssets[0])
+        }
+      }
+    }
+    if ($containerArtifacts.Count -gt 0) {
+      $cliArtifacts = [pscustomobject]$containerArtifacts
     }
     if ($capture.PSObject.Properties['baseVi']) { $captureBaseValue = $capture.baseVi }
     if ($capture.PSObject.Properties['headVi']) { $captureHeadValue = $capture.headVi }

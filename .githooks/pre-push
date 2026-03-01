@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+script_path="$repo_root/tools/Test-DockerDesktopFastLoop.ps1"
+
+if [[ ! -f "$script_path" ]]; then
+  echo "Missing fast loop script: $script_path" >&2
+  exit 1
+fi
+
+args=(-NoLogo -NoProfile -File "$script_path")
+
+if [[ -n "${PRVI_FAST_LOOP_WAIVERS:-}" ]]; then
+  IFS=',' read -r -a waiver_tokens <<< "${PRVI_FAST_LOOP_WAIVERS}"
+  for token in "${waiver_tokens[@]}"; do
+    trimmed="$(echo "$token" | xargs)"
+    if [[ -n "$trimmed" ]]; then
+      args+=(-Waiver "$trimmed")
+    fi
+  done
+fi
+
+echo "[pre-push] Running Docker Desktop fast loop gate..."
+pwsh "${args[@]}"

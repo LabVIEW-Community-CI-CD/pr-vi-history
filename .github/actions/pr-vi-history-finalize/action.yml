@@ -195,13 +195,13 @@ runs:
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '- Pair list was truncated by `max_targets`.'
         }
         if (-not [string]::IsNullOrWhiteSpace($windowsCapturePathInput)) {
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Windows capture: `{0}`" -f $windowsCapturePathInput)
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ('- Windows capture: ' + $windowsCapturePathInput)
         }
         if (-not [string]::IsNullOrWhiteSpace($linuxSmokeSummaryPathInput)) {
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Linux smoke summary: `{0}`" -f $linuxSmokeSummaryPathInput)
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ('- Linux smoke summary: ' + $linuxSmokeSummaryPathInput)
         }
         if (-not [string]::IsNullOrWhiteSpace($toolchainContractPathInput)) {
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Toolchain contract: `{0}`" -f $toolchainContractPathInput)
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ('- Toolchain contract: ' + $toolchainContractPathInput)
         }
 
         if ($windowsStatus -ne 'success') {

@@ -169,7 +169,7 @@ runs:
         }
         if ($modeTokens.Count -gt 0) {
           $args += '-Mode'
-          $args += $modeTokens
+          $args += ($modeTokens -join ',')
         }
         if ([string]::Equals('${{ inputs.include_merge_parents }}', 'true', [System.StringComparison]::OrdinalIgnoreCase)) {
           $args += '-IncludeMergeParents'

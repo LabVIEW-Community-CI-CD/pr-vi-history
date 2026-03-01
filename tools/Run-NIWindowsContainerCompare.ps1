@@ -542,6 +542,27 @@ try {
     }
 
     if (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf) {
+      $extractScript = Join-Path $PSScriptRoot 'Extract-EmbeddedReportImages.ps1'
+      if (Test-Path -LiteralPath $extractScript -PathType Leaf) {
+        try {
+          $extraction = & $extractScript `
+            -HtmlPath $resolvedReportPath `
+            -OutputDir (Join-Path $reportDirectory 'report-assets') `
+            -FilePrefix 'compare-report-image'
+          if ($extraction -and $extraction.PSObject.Properties['extractedCount']) {
+            $capture.embeddedImageCount = [int]$extraction.extractedCount
+          }
+          if ($extraction -and $extraction.PSObject.Properties['decodeFailures']) {
+            $failures = @($extraction.decodeFailures)
+            if ($failures.Count -gt 0) {
+              $capture.embeddedImageDecodeFailures = $failures
+            }
+          }
+        } catch {
+          $capture.embeddedImageExtractionError = $_.Exception.Message
+        }
+      }
+
       $assetFiles = @()
       foreach ($pattern in @('*.png','*.jpg','*.jpeg','*.gif','*.webp','*.svg')) {
         $assetFiles += Get-ChildItem -LiteralPath $reportDirectory -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue

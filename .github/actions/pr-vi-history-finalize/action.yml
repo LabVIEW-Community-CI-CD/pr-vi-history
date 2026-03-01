@@ -113,49 +113,78 @@ runs:
   steps:
     - id: finalize
       shell: pwsh
+      env:
+        INPUT_PAIR_COUNT: ${{ inputs.pair_count }}
+        INPUT_PAIR_TOTAL_COUNT: ${{ inputs.pair_total_count }}
+        INPUT_SUMMARY_PATH: ${{ inputs.summary_path }}
+        INPUT_RESULTS_ROOT: ${{ inputs.results_root }}
+        INPUT_MANIFEST_PATH: ${{ inputs.manifest_path }}
+        INPUT_TARGET_COUNT: ${{ inputs.target_count }}
+        INPUT_COMPLETED_COUNT: ${{ inputs.completed_count }}
+        INPUT_DIFF_COUNT: ${{ inputs.diff_count }}
+        INPUT_MARKDOWN_PATH: ${{ inputs.markdown_path }}
+        INPUT_ARTIFACT_NAME: ${{ inputs.artifact_name }}
+        INPUT_WINDOWS_LANE_STATUS: ${{ inputs.windows_lane_status }}
+        INPUT_LINUX_LANE_STATUS: ${{ inputs.linux_lane_status }}
+        INPUT_WINDOWS_CAPTURE_PATH: ${{ inputs.windows_capture_path }}
+        INPUT_LINUX_SMOKE_SUMMARY_PATH: ${{ inputs.linux_smoke_summary_path }}
+        INPUT_TOOLCHAIN_CONTRACT_PATH: ${{ inputs.toolchain_contract_path }}
+        INPUT_ENABLE_LINUX_SMOKE: ${{ inputs.enable_linux_smoke }}
       run: |
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
 
         $pairCount = 0
-        [void][int]::TryParse('${{ inputs.pair_count }}', [ref]$pairCount)
+        [void][int]::TryParse($env:INPUT_PAIR_COUNT, [ref]$pairCount)
         $pairTotalCount = $pairCount
-        [void][int]::TryParse('${{ inputs.pair_total_count }}', [ref]$pairTotalCount)
+        [void][int]::TryParse($env:INPUT_PAIR_TOTAL_COUNT, [ref]$pairTotalCount)
         if ($pairTotalCount -lt $pairCount) {
           $pairTotalCount = $pairCount
         }
         $pairTruncated = $pairTotalCount -gt $pairCount
 
-        $windowsStatus = '${{ inputs.windows_lane_status }}'.Trim().ToLowerInvariant()
+        $windowsStatus = ($env:INPUT_WINDOWS_LANE_STATUS ?? '').Trim().ToLowerInvariant()
         if ([string]::IsNullOrWhiteSpace($windowsStatus)) {
           $windowsStatus = 'unknown'
         }
 
-        $linuxStatus = '${{ inputs.linux_lane_status }}'.Trim().ToLowerInvariant()
+        $linuxStatus = ($env:INPUT_LINUX_LANE_STATUS ?? '').Trim().ToLowerInvariant()
         if ([string]::IsNullOrWhiteSpace($linuxStatus)) {
           $linuxStatus = 'skipped'
         }
-        $linuxEnabled = [string]::Equals('${{ inputs.enable_linux_smoke }}', 'true', [System.StringComparison]::OrdinalIgnoreCase)
+        $linuxEnabled = [string]::Equals(($env:INPUT_ENABLE_LINUX_SMOKE ?? ''), 'true', [System.StringComparison]::OrdinalIgnoreCase)
         if (-not $linuxEnabled) {
           $linuxStatus = 'skipped'
         }
 
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("summary_path={0}" -f '${{ inputs.summary_path }}') -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("results_root={0}" -f '${{ inputs.results_root }}') -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("manifest_path={0}" -f '${{ inputs.manifest_path }}') -Encoding utf8
+        $summaryPathInput = $env:INPUT_SUMMARY_PATH ?? ''
+        $resultsRootInput = $env:INPUT_RESULTS_ROOT ?? ''
+        $manifestPathInput = $env:INPUT_MANIFEST_PATH ?? ''
+        $targetCountInput = $env:INPUT_TARGET_COUNT ?? '0'
+        $completedCountInput = $env:INPUT_COMPLETED_COUNT ?? '0'
+        $diffCountInput = $env:INPUT_DIFF_COUNT ?? '0'
+        $markdownPathInput = $env:INPUT_MARKDOWN_PATH ?? ''
+        $artifactNameInput = $env:INPUT_ARTIFACT_NAME ?? ''
+        $windowsCapturePathInput = $env:INPUT_WINDOWS_CAPTURE_PATH ?? ''
+        $linuxSmokeSummaryPathInput = $env:INPUT_LINUX_SMOKE_SUMMARY_PATH ?? ''
+        $toolchainContractPathInput = $env:INPUT_TOOLCHAIN_CONTRACT_PATH ?? ''
+
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("summary_path={0}" -f $summaryPathInput) -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("results_root={0}" -f $resultsRootInput) -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("manifest_path={0}" -f $manifestPathInput) -Encoding utf8
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("pair_count={0}" -f $pairCount) -Encoding utf8
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("pair_total_count={0}" -f $pairTotalCount) -Encoding utf8
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("pair_truncated={0}" -f $pairTruncated.ToString().ToLowerInvariant()) -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("target_count={0}" -f '${{ inputs.target_count }}') -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("completed_count={0}" -f '${{ inputs.completed_count }}') -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("diff_count={0}" -f '${{ inputs.diff_count }}') -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("markdown_path={0}" -f '${{ inputs.markdown_path }}') -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("artifact_name={0}" -f '${{ inputs.artifact_name }}') -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("target_count={0}" -f $targetCountInput) -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("completed_count={0}" -f $completedCountInput) -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("diff_count={0}" -f $diffCountInput) -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("markdown_path={0}" -f $markdownPathInput) -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("artifact_name={0}" -f $artifactNameInput) -Encoding utf8
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("windows_lane_status={0}" -f $windowsStatus) -Encoding utf8
         Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("linux_lane_status={0}" -f $linuxStatus) -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("windows_capture_path={0}" -f '${{ inputs.windows_capture_path }}') -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("linux_smoke_summary_path={0}" -f '${{ inputs.linux_smoke_summary_path }}') -Encoding utf8
-        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("toolchain_contract_path={0}" -f '${{ inputs.toolchain_contract_path }}') -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("windows_capture_path={0}" -f $windowsCapturePathInput) -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("linux_smoke_summary_path={0}" -f $linuxSmokeSummaryPathInput) -Encoding utf8
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value ("toolchain_contract_path={0}" -f $toolchainContractPathInput) -Encoding utf8
 
         Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '### PR VI history lane summary'
         Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ''
@@ -165,14 +194,14 @@ runs:
         if ($pairTruncated) {
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value '- Pair list was truncated by `max_targets`.'
         }
-        if (-not [string]::IsNullOrWhiteSpace('${{ inputs.windows_capture_path }}')) {
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Windows capture: `{0}`" -f '${{ inputs.windows_capture_path }}')
+        if (-not [string]::IsNullOrWhiteSpace($windowsCapturePathInput)) {
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Windows capture: `{0}`" -f $windowsCapturePathInput)
         }
-        if (-not [string]::IsNullOrWhiteSpace('${{ inputs.linux_smoke_summary_path }}')) {
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Linux smoke summary: `{0}`" -f '${{ inputs.linux_smoke_summary_path }}')
+        if (-not [string]::IsNullOrWhiteSpace($linuxSmokeSummaryPathInput)) {
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Linux smoke summary: `{0}`" -f $linuxSmokeSummaryPathInput)
         }
-        if (-not [string]::IsNullOrWhiteSpace('${{ inputs.toolchain_contract_path }}')) {
-          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Toolchain contract: `{0}`" -f '${{ inputs.toolchain_contract_path }}')
+        if (-not [string]::IsNullOrWhiteSpace($toolchainContractPathInput)) {
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("- Toolchain contract: `{0}`" -f $toolchainContractPathInput)
         }
 
         if ($windowsStatus -ne 'success') {

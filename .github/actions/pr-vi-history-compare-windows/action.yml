@@ -86,9 +86,43 @@ runs:
         if (-not [string]::Equals($env:RUNNER_OS, 'Windows', [System.StringComparison]::OrdinalIgnoreCase)) {
           throw ("Windows container compare requires Windows host runner. RUNNER_OS={0}" -f $env:RUNNER_OS)
         }
-        $dockerOs = (& docker info --format '{{.OSType}}' 2>$null).Trim().ToLowerInvariant()
+
+        function Resolve-DockerOsType {
+          param(
+            [int]$Attempts = 4,
+            [int]$DelaySeconds = 5
+          )
+
+          for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+            $raw = & docker info --format '{{.OSType}}' 2>$null
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($raw)) {
+              return $raw.Trim().ToLowerInvariant()
+            }
+
+            if ($attempt -eq 1) {
+              foreach ($serviceName in @('docker', 'com.docker.service')) {
+                try {
+                  $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+                  if ($svc -and $svc.Status -ne 'Running') {
+                    Start-Service -Name $serviceName -ErrorAction Stop
+                  }
+                } catch {
+                  Write-Host ("Docker service start attempt for '{0}' failed: {1}" -f $serviceName, $_.Exception.Message)
+                }
+              }
+            }
+
+            if ($attempt -lt $Attempts) {
+              Start-Sleep -Seconds $DelaySeconds
+            }
+          }
+
+          return $null
+        }
+
+        $dockerOs = Resolve-DockerOsType
         if ([string]::IsNullOrWhiteSpace($dockerOs)) {
-          throw 'Unable to query Docker daemon OSType.'
+          throw 'Unable to query Docker daemon OSType. Docker service may be unavailable on this runner.'
         }
         if ($dockerOs -ne 'windows') {
           throw ("Docker daemon must be in Windows container mode. Current OSType={0}" -f $dockerOs)

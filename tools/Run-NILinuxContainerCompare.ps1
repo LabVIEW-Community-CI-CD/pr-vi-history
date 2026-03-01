@@ -598,6 +598,39 @@ try {
       $finalExitCode = $exitCode
     }
 
+    if (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf) {
+      $extractScript = Join-Path $PSScriptRoot 'Extract-EmbeddedReportImages.ps1'
+      if (Test-Path -LiteralPath $extractScript -PathType Leaf) {
+        try {
+          $extraction = & $extractScript `
+            -HtmlPath $resolvedReportPath `
+            -OutputDir (Join-Path $reportDirectory 'report-assets') `
+            -FilePrefix 'compare-report-image'
+          if ($extraction -and $extraction.PSObject.Properties['extractedCount']) {
+            $capture.embeddedImageCount = [int]$extraction.extractedCount
+          }
+          if ($extraction -and $extraction.PSObject.Properties['decodeFailures']) {
+            $failures = @($extraction.decodeFailures)
+            if ($failures.Count -gt 0) {
+              $capture.embeddedImageDecodeFailures = $failures
+            }
+          }
+        } catch {
+          $capture.embeddedImageExtractionError = $_.Exception.Message
+        }
+      }
+
+      $assetFiles = @()
+      foreach ($pattern in @('*.png','*.jpg','*.jpeg','*.gif','*.webp','*.svg')) {
+        $assetFiles += Get-ChildItem -LiteralPath $reportDirectory -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue
+      }
+      if ($assetFiles.Count -gt 0) {
+        $capture.reportAssets = @($assetFiles | Sort-Object FullName | ForEach-Object { $_.FullName })
+      } else {
+        $capture.reportAssets = @()
+      }
+    }
+
     if ($capture.status -eq 'ok' -and -not (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf)) {
       $capture.status = 'error'
       $capture.message = ("Expected report was not created: {0}" -f $resolvedReportPath)

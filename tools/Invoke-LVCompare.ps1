@@ -161,8 +161,17 @@ if (-not $PSBoundParameters.ContainsKey('Flags')) {
     $Flags = @($envFlagsRaw -split "`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
   }
 }
-try { Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools' 'VendorTools.psm1') -Force } catch {}
-try { Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools' 'LabVIEWCli.psm1') -Force } catch {}
+try {
+  Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools' 'VendorTools.psm1') -Force -ErrorAction Stop
+} catch {
+  Write-Verbose ("Invoke-LVCompare: failed to import VendorTools.psm1: {0}" -f $_.Exception.Message)
+}
+
+try {
+  Import-Module (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools' 'LabVIEWCli.psm1') -Force -ErrorAction Stop
+} catch {
+  Write-Warning ("Invoke-LVCompare: failed to import LabVIEWCli.psm1; falling back to direct LabVIEWCLI invocation. Reason: {0}" -f $_.Exception.Message)
+}
 
 $labviewPidTrackerModule = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools' 'LabVIEWPidTracker.psm1'
 $labviewPidTrackerLoaded = $false
@@ -287,6 +296,141 @@ function Set-DefaultLabVIEWCliPath {
   }
 
   return $cliPath
+}
+
+function Invoke-LVCreateComparisonReportFallback {
+  param(
+    [Parameter(Mandatory)][hashtable]$InvokeParams
+  )
+
+  $cliPath = Set-DefaultLabVIEWCliPath -ThrowOnMissing
+  if (-not $cliPath) {
+    throw 'LabVIEWCLI.exe could not be resolved for fallback invocation.'
+  }
+
+  $cliArgs = @(
+    '-OperationName', 'CreateComparisonReport',
+    '-VI1', [string]$InvokeParams.BaseVi,
+    '-VI2', [string]$InvokeParams.HeadVi
+  )
+
+  if ($InvokeParams.ContainsKey('ReportPath') -and -not [string]::IsNullOrWhiteSpace([string]$InvokeParams.ReportPath)) {
+    $cliArgs += '-ReportPath'
+    $cliArgs += [string]$InvokeParams.ReportPath
+  }
+  if ($InvokeParams.ContainsKey('ReportType') -and -not [string]::IsNullOrWhiteSpace([string]$InvokeParams.ReportType)) {
+    $cliArgs += '-ReportType'
+    $cliArgs += [string]$InvokeParams.ReportType
+  }
+  if ($InvokeParams.ContainsKey('LabVIEWPath') -and -not [string]::IsNullOrWhiteSpace([string]$InvokeParams.LabVIEWPath)) {
+    $cliArgs += '-LabVIEWPath'
+    $cliArgs += [string]$InvokeParams.LabVIEWPath
+  }
+  if ($InvokeParams.ContainsKey('Flags') -and $InvokeParams.Flags) {
+    foreach ($flag in @($InvokeParams.Flags)) {
+      if (-not [string]::IsNullOrWhiteSpace([string]$flag)) {
+        $cliArgs += [string]$flag
+      }
+    }
+  }
+
+  $psi = [System.Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = $cliPath
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.CreateNoWindow = $true
+  foreach ($arg in $cliArgs) {
+    [void]$psi.ArgumentList.Add([string]$arg)
+  }
+
+  $process = [System.Diagnostics.Process]::new()
+  $process.StartInfo = $psi
+
+  $startedAt = Get-Date
+  [void]$process.Start()
+
+  $timeoutHit = $false
+  $timeoutSecondsValue = $null
+  if ($InvokeParams.ContainsKey('TimeoutSeconds')) {
+    try { $timeoutSecondsValue = [int]$InvokeParams.TimeoutSeconds } catch { $timeoutSecondsValue = $null }
+  }
+
+  if ($timeoutSecondsValue -and $timeoutSecondsValue -gt 0) {
+    $waitMs = [Math]::Max(1000, ($timeoutSecondsValue * 1000))
+    if (-not $process.WaitForExit($waitMs)) {
+      $timeoutHit = $true
+      try { $process.Kill($true) } catch {}
+      try { $process.WaitForExit() } catch {}
+    }
+  } else {
+    $process.WaitForExit()
+  }
+
+  $stdout = ''
+  $stderr = ''
+  try { $stdout = $process.StandardOutput.ReadToEnd() } catch {}
+  try { $stderr = $process.StandardError.ReadToEnd() } catch {}
+
+  if ($timeoutHit) {
+    throw ("LabVIEW CLI compare timed out after {0} second(s)." -f $timeoutSecondsValue)
+  }
+
+  $elapsedSeconds = ((Get-Date) - $startedAt).TotalSeconds
+  $commandText = '{0} {1}' -f $cliPath, ($cliArgs -join ' ')
+
+  $normalizedParams = [ordered]@{}
+  if ($InvokeParams.ContainsKey('ReportPath')) { $normalizedParams.reportPath = [string]$InvokeParams.ReportPath }
+  if ($InvokeParams.ContainsKey('ReportType')) { $normalizedParams.reportType = [string]$InvokeParams.ReportType }
+
+  return [pscustomobject]@{
+    stdout           = $stdout
+    stderr           = $stderr
+    exitCode         = [int]$process.ExitCode
+    elapsedSeconds   = [double][Math]::Round($elapsedSeconds, 6)
+    cliPath          = $cliPath
+    args             = $cliArgs
+    command          = $commandText
+    normalizedParams = [pscustomobject]$normalizedParams
+  }
+}
+
+function Resolve-DefaultLabVIEWExePath {
+  param(
+    [ValidateSet('32','64')]
+    [string]$Bitness = '64'
+  )
+
+  $programRoot = if ($Bitness -eq '32') { ${env:ProgramFiles(x86)} } else { ${env:ProgramFiles} }
+  if ([string]::IsNullOrWhiteSpace($programRoot)) { return $null }
+
+  $niRoot = Join-Path $programRoot 'National Instruments'
+  if (-not (Test-Path -LiteralPath $niRoot -PathType Container)) { return $null }
+
+  $candidates = @()
+  try {
+    $lvDirs = Get-ChildItem -LiteralPath $niRoot -Directory -ErrorAction Stop | Where-Object { $_.Name -like 'LabVIEW *' }
+    foreach ($dir in $lvDirs) {
+      $exe = Join-Path $dir.FullName 'LabVIEW.exe'
+      if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { continue }
+      $version = 0
+      $nameMatch = [regex]::Match($dir.Name, '^LabVIEW\s+(?<ver>\d{4})')
+      if ($nameMatch.Success) {
+        [void][int]::TryParse($nameMatch.Groups['ver'].Value, [ref]$version)
+      }
+      $candidates += [pscustomobject]@{
+        Path = $exe
+        Version = $version
+      }
+    }
+  } catch {}
+
+  if ($candidates.Count -eq 0) {
+    return $null
+  }
+
+  $selected = $candidates | Sort-Object @{ Expression = 'Version'; Descending = $true }, @{ Expression = 'Path'; Descending = $true } | Select-Object -First 1
+  try { return (Resolve-Path -LiteralPath $selected.Path -ErrorAction Stop).Path } catch { return $selected.Path }
 }
 
 function Write-JsonEvent {
@@ -569,7 +713,13 @@ function Invoke-LabVIEWCLICompare {
     $invokeParams.TimeoutSeconds = $TimeoutSeconds
   }
 
-  $cliResult = Invoke-LVCreateComparisonReport @invokeParams
+  $lvCliCommand = Get-Command -Name 'Invoke-LVCreateComparisonReport' -ErrorAction SilentlyContinue
+  if ($lvCliCommand) {
+    $cliResult = Invoke-LVCreateComparisonReport @invokeParams
+  } else {
+    Write-Warning 'Invoke-LVCompare: Invoke-LVCreateComparisonReport is unavailable; using fallback direct LabVIEWCLI invocation.'
+    $cliResult = Invoke-LVCreateComparisonReportFallback -InvokeParams $invokeParams
+  }
 
   Set-Content -LiteralPath $stdoutPath -Value ($cliResult.stdout ?? '') -Encoding utf8
   Set-Content -LiteralPath $stderrPath -Value ($cliResult.stderr ?? '') -Encoding utf8
@@ -687,18 +837,17 @@ $stageCleanupRoot = $null
 
 try {
 
-# Resolve LabVIEW path (prefer explicit/env LABVIEW_PATH; fallback to 2025 canonical by bitness)
+# Resolve LabVIEW path (prefer explicit/env LABVIEW_PATH; fallback to latest installed by bitness)
 if (-not $LabVIEWExePath) {
   if ($env:LABVIEW_PATH) { $LabVIEWExePath = $env:LABVIEW_PATH }
 }
 if (-not $LabVIEWExePath) {
-  $parent = if ($LabVIEWBitness -eq '32') { ${env:ProgramFiles(x86)} } else { ${env:ProgramFiles} }
-  if ($parent) { $LabVIEWExePath = Join-Path $parent 'National Instruments\LabVIEW 2025\LabVIEW.exe' }
+  $LabVIEWExePath = Resolve-DefaultLabVIEWExePath -Bitness $LabVIEWBitness
 }
 if (-not $LabVIEWExePath -or -not (Test-Path -LiteralPath $LabVIEWExePath -PathType Leaf)) {
   $expectedParent = if ($LabVIEWBitness -eq '32') { ${env:ProgramFiles(x86)} } else { ${env:ProgramFiles} }
-  $expected = if ($expectedParent) { Join-Path $expectedParent 'National Instruments\LabVIEW 2025\LabVIEW.exe' } else { '(unknown ProgramFiles)' }
-  $labviewPathMessage = "Invoke-LVCompare: LabVIEWExePath could not be resolved. Set LABVIEW_PATH or pass -LabVIEWExePath. Expected canonical for bitness {0}: {1}" -f $LabVIEWBitness, $expected
+  $expected = if ($expectedParent) { Join-Path $expectedParent 'National Instruments\LabVIEW <year>\LabVIEW.exe' } else { '(unknown ProgramFiles)' }
+  $labviewPathMessage = "Invoke-LVCompare: LabVIEWExePath could not be resolved. Set LABVIEW_PATH or pass -LabVIEWExePath. Expected install root for bitness {0}: {1}" -f $LabVIEWBitness, $expected
   Write-Error $labviewPathMessage
   Finalize-LabVIEWPidTracker -Status 'error' -ExitCode 2 -ProcessExitCode 2 -Message $labviewPathMessage
   exit 2

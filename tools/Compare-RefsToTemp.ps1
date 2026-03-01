@@ -36,6 +36,18 @@ function Resolve-CompareVIScriptsRoot {
   if (-not [string]::IsNullOrWhiteSpace($scriptsOverride)) {
     $candidateRoots.Add($scriptsOverride) | Out-Null
   }
+  $scriptRepoRoot = $null
+  try {
+    $scriptToolsRoot = Split-Path -Parent $PSCommandPath
+    if (-not [string]::IsNullOrWhiteSpace($scriptToolsRoot)) {
+      $scriptRepoRoot = Split-Path -Parent $scriptToolsRoot
+    }
+  } catch {
+    $scriptRepoRoot = $null
+  }
+  if (-not [string]::IsNullOrWhiteSpace($scriptRepoRoot)) {
+    $candidateRoots.Add($scriptRepoRoot) | Out-Null
+  }
   if (-not [string]::IsNullOrWhiteSpace($PrimaryRoot)) {
     $candidateRoots.Add($PrimaryRoot) | Out-Null
   }
